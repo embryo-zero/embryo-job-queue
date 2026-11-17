@@ -1,0 +1,548 @@
+/*****************************************************************************\
+ *  licenses.h - Definitions for handling cluster-wide consumable resources
+ *****************************************************************************
+ *  Copyright (C) 2008-2011 Lawrence Livermore National Security.
+ *  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
+ *  Written by Morris Jette <jette@llnl.gov>, et. al.
+ *  CODE-OCEC-09-009. All rights reserved.
+ *
+ *  This file is part of Slurm, a resource management program.
+ *  For details, see <https://slurm.schedmd.com/>.
+ *  Please also read the included file: DISCLAIMER.
+ *
+ *  Slurm is free software; you can redistribute it and/or modify it under
+ *  the terms of the GNU General Public License as published by the Free
+ *  Software Foundation; either version 2 of the License, or (at your option)
+ *  any later version.
+ *
+ *  In addition, as a special exception, the copyright holders give permission
+ *  to link the code of portions of this program with the OpenSSL library under
+ *  certain conditions as described in each individual source file, and
+ *  distribute linked combinations including the two. You must obey the GNU
+ *  General Public License in all respects for all of the code used other than
+ *  OpenSSL. If you modify file(s) with this exception, you may extend this
+ *  exception to your version of the file(s), but you are not obligated to do
+ *  so. If you do not wish to do so, delete this exception statement from your
+ *  version.  If you delete this exception statement from all source files in
+ *  the program, then also delete it here.
+ *
+ *  Slurm is distributed in the hope that it will be useful, but WITHOUT ANY
+ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ *  FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ *  details.
+ *
+ *  You should have received a copy of the GNU General Public License along
+ *  with Slurm; if not, write to the Free Software Foundation, Inc.,
+ *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA.
+\*****************************************************************************/
+
+#ifndef _LICENSES_H
+#define _LICENSES_H
+
+#include "src/common/bitstring.h"
+#include "src/common/list.h"
+#include "src/slurmctld/slurmctld.h"
+
+#define HRES_MODE_OFF 0x00
+#define HRES_MODE_1 0x01
+#define HRES_MODE_2 0x02
+#define HRES_MODE_3 0x03
+
+#define MAX_HIERARCHY_DEPTH 16
+
+typedef struct {
+	uint16_t lic_id;
+	uint16_t hres_id;
+} licenses_id_t;
+
+typedef uint16_t path_idx_t[MAX_HIERARCHY_DEPTH];
+
+typedef struct {
+	uint32_t capacity;
+	bitstr_t *node_bitmap; /* alias of licenses_t.node_bitmap, never free */
+	path_idx_t path_idx;
+} hres_leaf_t;
+
+typedef struct {
+	uint32_t *avail_hres;
+	uint32_t *avail_hres_orig;
+	uint16_t depth;
+	uint32_t hres_per_node;
+	uint16_t layers_cnt; /* size of avail_hres */
+	hres_leaf_t *leaf;
+	uint16_t leaf_cnt; /* size of leaf */
+	licenses_id_t root_id;
+	bool test_only;
+	int topology_idx;
+} hres_select_t;
+
+typedef struct slurm_licenses licenses_t;
+typedef struct {
+	list_t *base; /* list of hres_variable_t */
+	uint32_t base_usage;
+	uint16_t depth; /* depth of layout */
+	bool disable_hres;
+	bool disable_layer;
+	uint16_t idx; /* internal index in hres_select_t -> avail_hres array */
+	char *layer_name;
+	uint16_t layers_cnt; /* count of layers, set only for root*/
+	uint16_t leaf_cnt; /* count of leafs, set only for root*/
+	uint16_t level; /* level - 0 for leaf */
+	uint32_t maintenance_cycle; /* seconds between maintenance runs */
+	uint32_t maintenance_timeout; /* max seconds for a maintenance run */
+	licenses_t *parent; /* pointer to parent - NULL for root */
+	char *parent_name;
+	path_idx_t path_idx;
+	list_t *plugin_args; /* list of hres_config_t, plugin arguments of a
+			      * job request, request entries only */
+	list_t *plugin_config; /* list of hres_config_t */
+	char *plugin_type; /* plugin type */
+	int topology_idx;
+	char *topology_name;
+	uint32_t total;
+	list_t *variables; /* list of hres_variable_t */
+} hres_rec_t;
+
+/* How the "(...)" part of a license string is interpreted */
+typedef enum {
+	HRES_SYNTAX_NONE = 0, /* "(" is an ordinary character */
+	HRES_SYNTAX_LAYERS, /* "(layer[*count][,...])" */
+	HRES_SYNTAX_ANY, /* layer syntax, falling back to the node list form
+			  * written by Slurm 26.05 and older */
+} hres_syntax_t;
+
+/*
+ * One charge made against a layer of an HRES on behalf of a job or a
+ * reservation. The layers charged are recorded when the resource is acquired
+ * so that exactly the same amount is released later, even if the nodes of a
+ * layer changed in between.
+ */
+typedef struct {
+	licenses_id_t id; /* layer that was charged */
+	char *layer_name; /* hres_rec.layer_name of that layer */
+	uint32_t count; /* amount charged against this layer */
+} hres_charge_t;
+
+/*
+ * One layer of a hierarchical resource, as the controller sees it now. Handed
+ * to the create_context and maintenance callbacks. After maintenance,
+ * disable_layer and down are applied to the layer, clearing disable_layer
+ * returns it to service.
+ */
+typedef struct {
+	bool disable_layer; /* plugin sets: disable this layer */
+	bool down; /* plugin sets: down this layer */
+	licenses_id_t id; /* which layer; not exposed to the plugin */
+	char *name; /* layer name */
+	char *nodes; /* nodes the layer covers */
+	uint32_t total; /* schedulable count, base already reserved */
+	uint32_t used; /* count in use */
+} hres_layer_t;
+
+struct slurm_licenses {
+	licenses_id_t id;
+	char *		name;		/* name associated with a license */
+	list_t *hres_charges; /* list of hres_charge_t. Set on job and
+			       * reservation records only, never on
+			       * cluster_license_list records. */
+	bool op_or; /* Whether the licenses were requested with AND or OR */
+	uint32_t	total;		/* total licenses available:
+					 *   configured - base_usage */
+	uint32_t	used;		/* used licenses */
+	uint32_t	reserved;	/* currently reserved licenses */
+	uint8_t         remote;	        /* non-zero if remote (from database) */
+	uint32_t last_deficit;		/* last calculated deficit */
+	uint32_t last_consumed;		/* consumed count (for remote) */
+	time_t last_update; /* last updated timestamp (for remote) */
+	bitstr_t *config_node_bitmap; /* baseline node_bitmap: resources.yaml
+				       * plus the HRES of dynamic nodes. Set
+				       * on cluster_license_list mode 1/2
+				       * layers and mode 3 leaves only. */
+	bitstr_t *node_bitmap;
+	char *nodes;
+	uint8_t mode;
+	hres_rec_t hres_rec;
+};
+
+/*
+ * In the future this should change to a more performant data structure.
+ */
+typedef struct xlist bf_licenses_t;
+
+typedef struct {
+	licenses_id_t id;
+	uint32_t remaining;
+	slurmctld_resv_t *resv_ptr;
+} bf_license_t;
+
+extern time_t last_license_update;
+
+/* Initialize license parameters on this system. Does not load licenses. */
+extern void license_init(void);
+
+extern int hres_init(void);
+
+/*
+ * Test whether a job's HRES async pre-run was lost. Only meaningful when
+ * slurmctld starts, before any async pre-run can run again.
+ * IN job_ptr - job to test
+ * RET true if the job is configuring for an async pre-run that never ended
+ */
+extern bool hres_job_async_lost(job_record_t *job_ptr);
+
+/*
+ * Requeue the jobs whose HRES async pre-run did not end before slurmctld
+ * stopped, the result is lost. Only at startup, after the jobs' usage is
+ * restored, when no async pre-run can be running.
+ */
+extern void hres_requeue_lost_async(void);
+
+extern int hres_update(hres_update_msg_t *msg, char **err_msg,
+		       bool *updated_nodes);
+
+/*
+ * hres_add_nodes
+ * Add nodes to the specified HRES layers, both to their current and their
+ * baseline membership. Used for new dynamic nodes.
+ * Mode 3 restriction - Only allow adding nodes to a single leaf layer.
+ *
+ * IN hres_info - List of HRES layers to which the nodes will be added
+ * IN node_names - Names of nodes to add, for log and error messages
+ * IN node_bitmap - Bitmap of nodes to add
+ * RET SLURM_SUCCESS or an error code
+ */
+extern int hres_add_nodes(list_t *hres_info, char *node_names,
+			  bitstr_t *node_bitmap);
+
+/*
+ * hres_rm_node
+ * Remove a node from all HRES layers, including its baseline membership.
+ *
+ * IN node_ptr - node to remove
+ */
+extern void hres_rm_node(node_record_t *node_ptr);
+
+/*
+ * hres_reset_node
+ * Return a node to its baseline HRES layer membership: resources.yaml, or the
+ * HRES a dynamic node was created with. Clears node_ptr->hres_list.
+ *
+ * IN node_ptr - node to reset
+ */
+extern void hres_reset_node(node_record_t *node_ptr);
+
+/*
+ * hres_validate_node_hres
+ * Validate an HRES specification for hres_set_nodes() without applying it.
+ *
+ * IN hres_list - list of node_hres_info_t, empty for no layers
+ * OUT layers - list of licenses_t * named by hres_list.
+ *              Caller must free with FREE_NULL_LIST.
+ * RET SLURM_SUCCESS or error code
+ */
+extern int hres_validate_node_hres(list_t *hres_list, list_t **layers);
+
+/*
+ * hres_set_nodes
+ * Replace the HRES layer membership of nodes. This must only be called after a
+ * successful call to hres_validate_node_hres().
+ *
+ * IN node_bitmap - nodes to update
+ * IN layers - list of HRES layers returned by hres_validate_node_hres() which
+ *             define the node's new HRES membership. If empty, remove the node
+ *             from all HRES layers.
+ */
+extern void hres_set_nodes(bitstr_t *node_bitmap, list_t *layers);
+
+/*
+ * Snapshot the current per-layer state of one hierarchical resource for its
+ * plugin's create_context and maintenance callbacks.
+ * IN hres_id - resource to snapshot
+ * IN locked - true if the caller already holds license_mutex
+ * RET list of hres_layer_t, caller must FREE_NULL_LIST()
+ */
+extern list_t *hres_layers_snapshot(uint16_t hres_id, bool locked);
+
+extern int hres_filter(job_record_t *job_ptr, bitstr_t *node_bitmap);
+
+/*
+ * hres_job_resolve - Resolve which HRES layers a job will use and record them
+ *	as hres_charges on its license entries. Run after the job's nodes are
+ *	selected and before license_job_get().
+ * IN job_ptr - job identification
+ * RET SLURM_SUCCESS or failure code
+ */
+extern int hres_job_resolve(job_record_t *job_ptr);
+
+/*
+ * Describe the job's HRES charges for its nodes. Only hres_id, name and layers
+ * are set, the HRES interface adds the plugin part.
+ * IN job_ptr - job identification
+ * RET list of hres_prep_t or NULL, caller must FREE_NULL_LIST()
+ */
+extern list_t *hres_job_prep_list(job_record_t *job_ptr);
+
+/*
+ * Test whether disabled HRES layers alone leave a job no node to run on in a
+ * partition: a requested HRES disabled as a whole, or every candidate node
+ * served only by disabled layers.
+ * IN job_ptr - job whose license_list is examined
+ * IN part_ptr - partition being tried
+ * RET true if the job cannot run until layers are enabled again
+ */
+extern bool hres_job_disabled(job_record_t *job_ptr, part_record_t *part_ptr);
+
+extern bool hres_select_check(hres_select_t *hres_select,
+			      uint16_t hres_leaf_idx);
+
+extern void hres_select_return(hres_select_t *hres_select,
+			       uint16_t hres_leaf_idx);
+
+extern void hres_create_select(job_record_t *job_ptr);
+
+extern uint32_t hres_get_capacity(hres_select_t *hres_select, int leaf_idx);
+
+extern uint16_t hres_select_find_leaf(hres_select_t *hres_select, int node_inx);
+
+extern void hres_select_free(job_record_t *job_ptr);
+
+extern void hres_select_print(hres_select_t *hres_select);
+
+extern void hres_pre_select(job_record_t *job_ptr, bool test_only);
+
+extern void hres_pre_select_with_list(job_record_t *job_ptr, bool test_only,
+				      list_t *license_list);
+
+extern bool hres_jobs_share_mode3(job_record_t *job1_ptr,
+				  job_record_t *job2_ptr);
+
+extern bool hres_preempt_needed(job_record_t *preemptor,
+				job_record_t *preemptee);
+
+/*
+ * Release the HRES that hres_preempt_needed() reserved for a preemptee it
+ * reported as not needed, when that preemptee is preempted anyway.
+ */
+extern void hres_preempt_return(job_record_t *preemptor,
+				job_record_t *preemptee);
+
+extern void slurm_bf_hres_pre_select(job_record_t *job_ptr,
+				     bf_licenses_t *bf_licenses);
+
+extern int hres_filter_with_list(job_record_t *job_ptr, bitstr_t *node_bitmap,
+				 list_t *license_list);
+extern void slurm_bf_hres_filter(job_record_t *job_ptr, bitstr_t *node_bitmap,
+				 bf_licenses_t *bf_licenses);
+
+/* Update licenses on this system based upon slurm.conf.
+ * Remove all previously allocated licenses */
+extern int license_update(char *licenses);
+
+extern void license_add_remote(slurmdb_res_rec_t *rec);
+extern void license_update_remote(slurmdb_res_rec_t *rec);
+extern void license_remove_remote(slurmdb_res_rec_t *rec);
+extern void license_sync_remote(list_t *res_list);
+
+/* Free memory associated with licenses on this system */
+extern void license_free(void);
+
+/* Free a license_t record (for use by list_destroy) */
+extern void license_free_rec(void *x);
+
+/* Free an hres_charge_t record (for use by list_destroy) */
+extern void hres_charge_free(void *x);
+
+/* Free an hres_layer_t record (for use by list_destroy) */
+extern void hres_layer_free(void *x);
+
+/*
+ * license_copy - create a copy of license list
+ * RET a copy of the license list
+ */
+extern list_t *license_copy(list_t *license_list_src);
+extern list_t *cluster_license_copy(void);
+
+extern licenses_t *license_find_rec_by_id(list_t *license_list,
+					  licenses_id_t id);
+/*
+ * license_job_get - Get the licenses required for a job
+ * IN job_ptr - job identification
+ * IN restore - is this a new allocation, or are we loading state from disk
+ * RET SLURM_SUCCESS or failure code
+ */
+extern int license_job_get(job_record_t *job_ptr, bool restore);
+
+/*
+ * license_job_merge - The licenses from one job have just been merged into
+ *	another job by appending one job's licenses to another, possibly
+ *	including duplicate names. Reconstruct this job's licenses and
+ *	license_list fields to eliminate duplicates.
+ */
+extern void license_job_merge(job_record_t *job_ptr);
+
+/*
+ * Return the licenses allocated to a job to the provided list
+ * IN job_ptr - job identification
+ * IN license_list - list of license_t records
+ * RET SLURM_SUCCESS or failure code
+ */
+extern int license_job_return_to_list(job_record_t *job_ptr,
+				      list_t *license_list);
+
+/*
+ * license_job_return - Return the licenses allocated to a job
+ * IN job_ptr - job identification
+ * RET SLURM_SUCCESS or failure code
+ */
+extern int license_job_return(job_record_t *job_ptr);
+
+/*
+ * license_job_test_with_list - Test if the licenses required for a job are
+ *	available in provided list
+ * IN job_ptr - job identification
+ * IN when    - time to check
+ * IN reboot    - true if node reboot required to start job
+ * IN check_preempt_licenses - If false, do not look for licenses to preempt
+ * RET: SLURM_SUCCESS, EAGAIN (not available now), SLURM_ERROR (never runnable)
+ */
+extern int license_job_test_with_list(job_record_t *job_ptr, time_t when,
+				      bool reboot, list_t *license_list,
+				      bool check_preempt_licenses);
+
+/*
+ * license_job_test - Test if the licenses required for a job are available
+ * IN job_ptr - job identification
+ * IN when    - time to check
+ * IN reboot    - true if node reboot required to start job
+ * RET: SLURM_SUCCESS, EAGAIN (not available now), SLURM_ERROR (never runnable)
+ */
+extern int license_job_test(job_record_t *job_ptr, time_t when,
+			    bool reboot);
+
+/*
+ * license_validate - Test if the required licenses are valid
+ * IN licenses - required licenses
+ * IN validate_configured - if true, validate that there are enough configured
+ *                          licenses for the requested amount.
+ * IN validate_existing - if true, validate that licenses exist, otherwise don't
+ *                        return them in the final list.
+ * IN validate_plugin_args - if true, let the HRES plugins check the plugin
+ *                           arguments of a job's request
+ * OUT tres_req_cnt - appropriate counts for each requested gres
+ * OUT valid - true if required licenses are valid and a sufficient number
+ *             are configured (though not necessarily available now)
+ * OUT fuzzy_match - true if fuzzy matching was actually used in validation
+ *                   ok to pass NULL if caller doesn't require the output
+ * RET license_list, must be destroyed by caller
+ */
+extern list_t *license_validate(char *licenses, bool validate_configured,
+				bool validate_existing,
+				bool validate_plugin_args,
+				hres_syntax_t hres_syntax,
+				uint64_t *tres_req_cnt, bool *valid,
+				bool *fuzzy_match);
+
+/*
+ * license_list_overlap - test if there is any overlap in licenses
+ *	names found in the two lists
+ */
+extern bool license_list_overlap(list_t *list_1, list_t *list_2);
+
+/*
+ * license_list_overlap_non_hres - test if there is any overlap in non-hres
+ *	licenses names found in the two lists
+ */
+extern bool license_list_overlap_non_hres(list_t *list_1, list_t *list_2);
+
+/*
+ * Given a list of license_t records, return a license string.
+ *
+ * This can be combined with _build_license_list() to eliminate duplicates
+ * (e.g. "tux*2,tux*3" gets changed to "tux*5").
+ *
+ * IN license_list - list of license_t records
+ *
+ * RET string representation of licenses. Must be destroyed by caller.
+ */
+extern char *license_list_to_string(list_t *license_list);
+
+/* pack_all_licenses()
+ *
+ * Get the licenses and the usage counters in the io buffer
+ * to be sent out to the library
+ */
+extern buf_t *get_all_license_info(uint16_t protocol_version);
+
+/*
+ * get_total_license_cnt - give me the total count of a given license name.
+ *
+ */
+extern uint32_t get_total_license_cnt(char *name);
+
+/* node_read should be locked before coming in here
+ * returns tres_str of the license_list.
+ */
+extern char *licenses_2_tres_str(list_t *license_list);
+
+
+/* node_read should be locked before coming in here
+ * fills in tres_cnt of the license_list.
+ * locked if assoc_mgr tres read lock is locked or not.
+ */
+extern void license_set_job_tres_cnt(list_t *license_list,
+				     uint64_t *tres_cnt,
+				     bool locked);
+
+extern bf_licenses_t *bf_licenses_initial(bool bf_running_job_reserve);
+
+extern int bf_license_cmp(void *x, void *y);
+
+extern char *bf_licenses_to_string(bf_licenses_t *licenses_list);
+
+/*
+ * A NULL licenses argument to these functions indicates that backfill
+ * license tracking support has been disabled, or that the system has no
+ * licenses to track.
+ *
+ * The backfill scheduler is especially performance sensitive, so each of these
+ * functions is wrapped in a macro that avoids the function call when a NULL
+ * licenses list is provided as the first argument.
+ */
+#define bf_hres_filter(_x, _y, _z) \
+	(_z ? slurm_bf_hres_filter(_x, _y, _z) : NULL)
+extern void slurm_bf_hres_filter(job_record_t *job_ptr, bitstr_t *node_bitmap,
+				 bf_licenses_t *bf_license_list);
+
+#define bf_licenses_copy(_x) (_x ? slurm_bf_licenses_copy(_x) : NULL)
+extern bf_licenses_t *slurm_bf_licenses_copy(bf_licenses_t *licenses_src);
+
+#define bf_licenses_deduct(_x, _y) (_x ? slurm_bf_licenses_deduct(_x, _y) : NULL)
+extern void slurm_bf_licenses_deduct(bf_licenses_t *licenses,
+				     job_record_t *job_ptr);
+
+#define bf_licenses_transfer(_x, _y) (_x ? slurm_bf_licenses_transfer(_x, _y) : NULL)
+extern void slurm_bf_licenses_transfer(bf_licenses_t *licenses,
+				       job_record_t *job_ptr);
+
+#define bf_licenses_avail(_x, _y, _z) \
+	(_x ? slurm_bf_licenses_avail(_x, _y, _z) : true)
+extern bool slurm_bf_licenses_avail(bf_licenses_t *licenses,
+				    job_record_t *job_ptr,
+				    bitstr_t *node_bitmap);
+
+#define bf_licenses_equal(_x, _y) (_x ? slurm_bf_licenses_equal(_x, _y) : true)
+extern bool slurm_bf_licenses_equal(bf_licenses_t *a, bf_licenses_t *b);
+
+#define bf_licenses_relevant_hres_increase(_x, _y, job_ptr) \
+	(_x ? slurm_bf_licenses_relevant_hres_increase(_x, _y, job_ptr) : false)
+/*
+ * Return true if the job requests an hres license and 'next' has an licenses
+ * with the same hres_id that has more remaining than in 'current'.
+ */
+extern bool slurm_bf_licenses_relevant_hres_increase(list_t *current,
+						     list_t *next,
+						     job_record_t *job_ptr);
+
+#define FREE_NULL_BF_LICENSES(_x) FREE_NULL_LIST(_x)
+
+#endif /* !_LICENSES_H */

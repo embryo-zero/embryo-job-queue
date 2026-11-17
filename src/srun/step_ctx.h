@@ -1,0 +1,92 @@
+/*****************************************************************************\
+ *  step_ctx.h - step context declarations
+ *****************************************************************************
+ *  Copyright (C) 2006 The Regents of the University of California.
+ *  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
+ *  Written by Morris Jette <jette1@llnl.gov>,
+ *  Christopher J. Morrone <morrone2@llnl.gov>
+ *  CODE-OCEC-09-009. All rights reserved.
+ *
+ *  This file is part of Slurm, a resource management program.
+ *  For details, see <https://slurm.schedmd.com/>.
+ *  Please also read the included file: DISCLAIMER.
+ *
+ *  Slurm is free software; you can redistribute it and/or modify it under
+ *  the terms of the GNU General Public License as published by the Free
+ *  Software Foundation; either version 2 of the License, or (at your option)
+ *  any later version.
+ *
+ *  Slurm is distributed in the hope that it will be useful, but WITHOUT ANY
+ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ *  FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ *  details.
+ *
+ *  You should have received a copy of the GNU General Public License along
+ *  with Slurm; if not, write to the Free Software Foundation, Inc.,
+ *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA.
+\*****************************************************************************/
+#ifndef _SRUN_STEP_CTX_H
+#define _SRUN_STEP_CTX_H
+
+#include <inttypes.h>
+#include <unistd.h>
+
+#include "slurm/slurm.h"
+
+#include "src/api/step_launch.h"
+
+#include "src/common/step_ctx.h"
+
+typedef struct srun_job srun_job_t;
+
+/*
+ * step_ctx_listener_create - Open the listener srun tells the controller
+ *	about and hand it to conmgr. Retain RPCs until a pending-step wait
+ *	consumes them or the launch handler takes over.
+ * IN/OUT job - job whose listener state tracks the listener
+ * OUT port_ptr - port the listener is bound to
+ * RET SLURM_SUCCESS or error
+ */
+extern int step_ctx_listener_create(srun_job_t *job, uint16_t *port_ptr);
+
+/*
+ * step_ctx_publish_launch - Replay queued RPCs and hand over the listener.
+ *	Call after slurm_step_launch() returns, including on failure, before
+ *	waiting for tasks to finish.
+ * IN/OUT job - job whose launch state receives the RPCs
+ */
+extern void step_ctx_publish_launch(srun_job_t *job);
+
+/*
+ * step_ctx_create_timeout - Create a job step and its context.
+ * IN step_req - job step request
+ * IN timeout - in milliseconds
+ * IN srun_opt - srun options
+ * IN/OUT job - job the step is created for; its listener state receives the
+ *	queued step's RPCs while the step is pending
+ * OUT retry_cause - why the step could not be created yet, so the caller can
+ *	report it alongside ESLURM_STEP_TIMED_OUT
+ * RET the step context or NULL on failure with slurm errno set
+ *	(ESLURM_STEP_TIMED_OUT or ESLURM_STEP_CANCELLED while waiting on a
+ *	queued step)
+ * NOTE: Free allocated memory using step_ctx_destroy()
+ */
+extern slurm_step_ctx_t *step_ctx_create_timeout(step_create_req_msg_t
+							 *step_req,
+						 int timeout,
+						 srun_opt_t *srun_opt,
+						 srun_job_t *job,
+						 int *retry_cause);
+
+/*
+ * step_ctx_create_no_alloc - Create a job step and its context without
+ *                            getting an allocation.
+ * IN step_req - job step request
+ * IN step_id     - since we are faking it give me the id to use
+ * RET the step context or NULL on failure with slurm errno set
+ * NOTE: Free allocated memory using step_ctx_destroy()
+ */
+extern slurm_step_ctx_t *step_ctx_create_no_alloc(
+	step_create_req_msg_t *step_req, uint32_t step_id);
+
+#endif /* _SRUN_STEP_CTX_H */

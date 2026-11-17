@@ -1,0 +1,250 @@
+.TH slurmdbd "8" "Slurm Daemon" "Slurm 27.05" "Slurm Daemon"
+
+.SH "NAME"
+slurmdbd \- Slurm Database Daemon.
+
+.SH "SYNOPSIS"
+\fBslurmdbd\fR [\fIOPTIONS\fR...]
+
+.SH "DESCRIPTION"
+\fBslurmdbd\fR provides a secure enterprise\-wide interface to a database
+for Slurm. This is particularly useful for archiving accounting records.
+
+.SH "OPTIONS"
+
+.TP
+\fB\-D\fR
+Run \fBslurmdbd\fR in the foreground with logging copied to stdout.
+.IP
+
+.TP
+\fB\-h\fR
+Help; print a brief summary of command options.
+.IP
+
+.TP
+\fB\-n <value>\fR
+Set the daemon's nice value to the specified value, typically a negative number.
+.IP
+
+.TP
+\fB\-s\fR
+Change working directory of slurmdbd to LogFile path if possible, or to /var/tmp
+otherwise.
+.IP
+
+.TP
+\fB\-u\fR
+Only display the Slurm Database version and if conversion is needed and exit
+without taking control. If no conversion is needed 0 is returned, if conversion
+is needed 1 is returned.
+.IP
+
+.TP
+\fB\-v\fR
+Verbose operation. Multiple \fBv\fR's can be specified, with each '\fBv\fR'
+beyond the first increasing verbosity, up to 6 times (i.e. \-vvvvvv).
+.IP
+
+.TP
+\fB\-V\fR
+Print version information and exit.
+.IP
+
+.SH "ENVIRONMENT VARIABLES"
+The following environment variables can be used to override settings
+compiled into slurmdbd.
+
+.TP
+\fBABORT_ON_FATAL\fR
+When a fatal error is detected, use abort() instead of exit() to terminate the
+process. This allows backtraces to be captured without recompiling Slurm.
+.IP
+
+.SH "HTTP server"
+
+The HTTP server shares the RPC listening sockets on \fBDbdPort\fR.
+Set \fBCommunicationParameters\fR=\fBdisable_http\fR in
+\fBslurmdbd.conf\fR(5) to disable HTTP without disabling RPC service.
+Changes to \fBdisable_http\fR or \fBHttpAuthParameters\fR are not picked up
+by \fBsacctmgr reconfigure\fR; they require a restart of \fBslurmdbd\fR.
+
+Plain HTTP remains available even when \fBTLSType\fR requires TLS for RPCs.
+HTTPS is available when TLS support and server certificates are configured.
+Use HTTPS to protect authentication tokens in transit.
+
+Configure \fBHttpAuthParameters\fR in \fBslurmdbd.conf\fR(5) for requests
+that require authentication.
+Supply a JWT using either \fBAuthorization\fR: \fBBearer\fR <\fItoken\fR>
+or \fBX\-SLURM\-USER\-TOKEN\fR.
+The optional \fBX\-SLURM\-USER\-NAME\fR header supplies the user name.
+Do not send both token headers in one request; such a request returns
+HTTP 401.
+HTTP and RPC authentication use independent keys; an RPC JWT is not
+necessarily valid for HTTP.
+When \fBHttpAuthParameters\fR is unset, requests requiring authentication
+return HTTP 401, while public endpoints remain available.
+
+Ordinary replies and unknown paths support HTTP/1.1 connection reuse.
+A \fBConnection\fR: \fBclose\fR request closes the connection after its reply.
+Authentication and endpoint request failures may close the connection.
+
+.SS "Public endpoints"
+All endpoints use the GET method.
+
+.TP
+\fBGET /\fR
+.RS
+Return the endpoint index with HTTP 200.
+.RE
+.IP
+
+.TP
+\fBGET /healthz\fR
+Test whether the daemon is online.
+Return HTTP 200 with a body of \fBHEALTHY\fR on success, or HTTP 500 with
+an empty body on failure.
+.IP
+
+.TP
+\fBGET /livez\fR
+Test whether the daemon is online.
+Return HTTP 200 with a body of \fBLIVE\fR on success, or HTTP 500 with
+an empty body on failure.
+.IP
+
+.TP
+\fBGET /readyz\fR[\fB?verbose\fR]
+Test whether this daemon is the active \fBslurmdbd\fR, not a standby backup,
+and whether its readiness probes pass.
+Return HTTP 200 with a body of \fBREADY\fR on success, or HTTP 500 with
+an empty body on failure.
+With \fB?verbose\fR, the body holds the probe details, if any, instead of
+\fBREADY\fR on success or an empty body on failure.
+A verbose request requires authentication as root or \fBSlurmUser\fR.
+Missing credentials return HTTP 401; an authenticated user without the
+required privilege receives HTTP 403.
+The verbose output is intended for humans, not as a stable data format.
+.IP
+
+.PP
+Unknown paths return HTTP 404.
+
+.SS "Versioned endpoints"
+Replace <\fIdata_parser\fR> with an installed parser version, such as
+\fBv0.0.47\fR.
+Successful replies use that parser's response schema and default to JSON.
+Use the \fBAccept\fR header to select a supported serializer format, for
+example \fBapplication/json\fR.
+See \fBSerializerPlugins\fR in \fBslurmdbd.conf\fR(5).
+These endpoints require HTTP authentication and return HTTP 200 on success.
+Missing credentials or invalid tokens return HTTP 401; an authenticated
+user without the required privilege receives HTTP 403.
+Endpoint errors may return a plain-text explanation rather than JSON.
+
+.TP
+\fBGET /\fR<\fIdata_parser\fR>\fB/conf\fR
+Return the responding daemon's configuration in the \fBslurmdbd_conf\fR
+response field.
+Requires a <\fIdata_parser\fR> of \fBv0.0.45\fR or later; older parser
+versions return HTTP 404.
+Any authenticated user may request it.
+.IP
+
+.TP
+\fBGET /\fR<\fIdata_parser\fR>\fB/diag\fR
+Return the responding daemon's RPC and rollup statistics in the
+\fBstatistics\fR response field.
+RPC and user counters include counts and total and average processing
+times in microseconds.
+Any installed <\fIdata_parser\fR> version may be used.
+Requires root, \fBSlurmUser\fR, or an accounting user with
+\fBAdminLevel\fR=\fBAdministrator\fR.
+.IP
+
+.SS "Standby operation"
+A newly started backup (\fBDbdBackupHost\fR) does not open its RPC/HTTP
+listener until its first takeover, so connections to it, including
+\fB/livez\fR and \fB/healthz\fR, are refused until then.
+If it later returns to standby without restarting, the listener remains open.
+Standby mode alone does not fail \fB/livez\fR or \fB/healthz\fR, but causes
+\fB/readyz\fR to return HTTP 500.
+HTTP responses describe the answering daemon; requests are not redirected
+to the active peer.
+
+.SH "CORE FILE LOCATION"
+If slurmdbd is started with the \fB\-D\fR option then the core file will be
+written to the current working directory.
+Otherwise if \fBLogFile\fR in "slurmdbd.conf" is a fully qualified
+path name (starting with a slash), the core file will be written to
+the same directory as the log file, provided SlurmUser has write
+permission on the directory. Otherwise the core file will be written
+to "/var/tmp/" as a last resort. If neither of the above directories
+have write permission for SlurmUser, no core file will be produced.
+
+.SH "SIGNALS"
+
+.TP
+\fBSIGTERM SIGINT SIGQUIT\fR
+\fBslurmdbd\fR will shutdown cleanly, waiting for in\-progress rollups to
+finish.
+.IP
+
+.TP
+\fBSIGABRT\fR
+\fBslurmdbd\fR will perform a core dump, then exit. In\-progress operations
+are killed.
+.IP
+
+.TP
+\fBSIGHUP\fR
+Reloads the slurm configuration files, similar to 'scontrol reconfigure'.
+.IP
+
+.TP
+\fBSIGTSTP\fR
+Stop the process from a terminal.
+.IP
+
+.TP
+\fBSIGUSR2\fR
+Reread the log level from the configs, and then reopen the log file. This
+should be used when setting up \fBlogrotate\fR(8).
+.IP
+
+.TP
+\fBSIGCHLD SIGUSR1 SIGXCPU SIGPIPE SIGALRM\fR
+These signals are explicitly ignored.
+.IP
+
+.SH "NOTES"
+It may be useful to experiment with different \fBslurmctld\fR specific
+configuration parameters using a distinct configuration file
+(e.g. timeouts). However, this special configuration file will not be
+used by the \fBslurmd\fR daemon or the Slurm programs, unless you
+specifically tell each of them to use it. If you desire changing
+communication ports, the location of the temporary file system, or
+other parameters used by other Slurm components, change the common
+configuration file, \fBslurm.conf\fR.
+
+.SH "COPYING"
+Copyright (C) 2008 Lawrence Livermore National Security.
+Copyright (C) 2010\-2022 SchedMD LLC.
+Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
+CODE\-OCEC\-09\-009. All rights reserved.
+.LP
+This file is part of Slurm, a resource management program.
+For details, see <https://slurm.schedmd.com/>.
+.LP
+Slurm is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free
+Software Foundation; either version 2 of the License, or (at your option)
+any later version.
+.LP
+Slurm is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
+details.
+
+.SH "SEE ALSO"
+\fBslurm.conf\fR(5), \fBslurmdbd.conf\fR(5), \fBslurmctld\fR(8)

@@ -1,0 +1,770 @@
+/*****************************************************************************\
+ *  swait.c - Block until all regular steps of a stepmgr-enabled job
+ *	      have ended.
+ *****************************************************************************
+ *  Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ *  This file is part of Slurm, a resource management program.
+ *  For details, see <https://slurm.schedmd.com/>.
+ *  Please also read the included file: DISCLAIMER.
+ *
+ *  Slurm is free software; you can redistribute it and/or modify it under
+ *  the terms of the GNU General Public License as published by the Free
+ *  Software Foundation; either version 2 of the License, or (at your option)
+ *  any later version.
+ *
+ *  In addition, as a special exception, the copyright holders give permission
+ *  to link the code of portions of this program with the OpenSSL library under
+ *  certain conditions as described in each individual source file, and
+ *  distribute linked combinations including the two. You must obey the GNU
+ *  General Public License in all respects for all of the code used other than
+ *  OpenSSL. If you modify file(s) with this exception, you may extend this
+ *  exception to your version of the file(s), but you are not obligated to do
+ *  so. If you do not wish to do so, delete this exception statement from your
+ *  version.  If you delete this exception statement from all source files in
+ *  the program, then also delete it here.
+ *
+ *  Slurm is distributed in the hope that it will be useful, but WITHOUT ANY
+ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ *  FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ *  details.
+ *
+ *  You should have received a copy of the GNU General Public License along
+ *  with Slurm; if not, write to the Free Software Foundation, Inc.,
+ *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA.
+\*****************************************************************************/
+
+#include "config.h"
+
+#include <errno.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#include "slurm/slurm.h"
+#include "slurm/slurm_errno.h"
+
+#include "src/common/log.h"
+#include "src/common/macros.h"
+#include "src/common/read_config.h"
+#include "src/common/sercli.h"
+#include "src/common/sluid.h"
+#include "src/common/slurm_protocol_api.h"
+#include "src/common/slurm_protocol_defs.h"
+#include "src/common/workerpool.h"
+#include "src/common/xmalloc.h"
+#include "src/common/xstring.h"
+
+#include "src/conmgr/conmgr.h"
+
+#include "src/interfaces/conn.h"
+#include "src/interfaces/data_parser.h"
+#include "src/interfaces/serializer.h"
+
+#include "src/swait/opt.h"
+
+#define SWAIT_WORKERPOOL_THREADS 3
+
+/*
+ * exit_lock arbitrates between _on_msg (steps-drained: SWAIT_RC_OK, or
+ * SWAIT_RC_UNOBSERVED when a STEP target never reported) and _timeout_fire
+ * (SWAIT_RC_TIMEOUT). exit_decided is set by whichever callback wins the
+ * race; the loser becomes a no-op.
+ */
+static pthread_mutex_t exit_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * Serializes each completion's dump and its stdout write so that a record
+ * from one _on_msg() callback cannot interleave with another's. Under
+ * --follow the workerpool runs multiple callbacks concurrently.
+ */
+static pthread_mutex_t print_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool dump_failed; /* a completion could not be serialized; print_lock */
+static bool exit_decided;
+static int exit_rc;
+
+static char *my_cert;
+static char *my_host;
+static uint16_t my_port;
+static char *stepmgr_node;
+static data_parser_t *dump_parser;
+
+/*
+ * The plugin dump_parser resolved, as its data_parser/<ver>[+flags] string.
+ * _print_serialized() dumps through this rather than opt.data_parser so the
+ * dump uses the same plugin the pre-flight validated: DataParserParameters
+ * is honored, and sercli_dump_str()'s compiled-in fallback never silently
+ * diverges from the plugin the user asked for.
+ */
+static char *dump_parser_str;
+
+/*
+ * Mime type selected by --json/--yaml.
+ * RET mime type, or NULL when neither was given
+ */
+static const char *_dump_mime_type(void)
+{
+	if (opt.json)
+		return MIME_TYPE_JSON;
+	if (opt.yaml)
+		return MIME_TYPE_YAML;
+	return NULL;
+}
+
+/*
+ * query slurmctld for job's stepmgr node
+ *
+ * IN/OUT target - step_id selecting the job; job_id is overwritten
+ *                 with the per-task id for array-task input.
+ * RET xmalloc()'d hostname string (caller xfree()s)
+ */
+static char *_resolve_stepmgr_via_ctld(slurm_step_id_t *target)
+{
+	job_info_msg_t *resp = NULL;
+	slurm_job_info_t *info = NULL;
+	char *host = NULL;
+	bool is_array = false;
+
+	if (slurm_load_job(&resp, *target, SHOW_ALL) != SLURM_SUCCESS) {
+		error("cannot load %pI: %s", target, slurm_strerror(errno));
+		slurm_free_job_info_msg(resp);
+		exit(SWAIT_RC_ERROR);
+	}
+	if (!resp || (resp->record_count < 1) || !resp->job_array) {
+		error("cannot load %pI: empty controller response", target);
+		slurm_free_job_info_msg(resp);
+		exit(SWAIT_RC_ERROR);
+	}
+	for (uint32_t i = 0; i < resp->record_count; i++) {
+		if (resp->job_array[i].array_task_id != NO_VAL)
+			is_array = true;
+		if ((opt.array_task_id != NO_VAL) &&
+		    (resp->job_array[i].array_task_id == opt.array_task_id)) {
+			info = &resp->job_array[i];
+			break;
+		}
+	}
+
+	if (opt.array_task_id != NO_VAL) {
+		if (!info) {
+			if (is_array)
+				error("array task %u_%u: not found",
+				      opt.array_job_id, opt.array_task_id);
+			else
+				error("%pI: not an array job", target);
+			slurm_free_job_info_msg(resp);
+			exit(SWAIT_RC_ERROR);
+		}
+		target->job_id = info->job_id;
+	} else if (is_array && !target->sluid) {
+		if (resp->record_count > 1) {
+			error("%pI is an array job; pass a specific task offset (jobid_task)",
+			      target);
+			slurm_free_job_info_msg(resp);
+			exit(SWAIT_RC_ERROR);
+		}
+		info = &resp->job_array[0];
+		opt.array_job_id = info->array_job_id;
+		opt.array_task_id = info->array_task_id;
+		target->job_id = info->job_id;
+	} else {
+		info = &resp->job_array[0];
+		target->job_id = info->job_id;
+	}
+	if (!(info->bitflags & STEPMGR_ENABLED)) {
+		error("%pI does not have stepmgr enabled", target);
+		slurm_free_job_info_msg(resp);
+		exit(SWAIT_RC_ERROR);
+	}
+	if (!info->batch_host || !*info->batch_host) {
+		if (IS_JOB_PENDING(info))
+			error("%pI is still pending; swait does not wait for jobs to start",
+			      target);
+		else
+			error("%pI: stepmgr host is unknown (controller bug?)",
+			      target);
+		slurm_free_job_info_msg(resp);
+		exit(SWAIT_RC_ERROR);
+	}
+	host = xstrdup(info->batch_host);
+	verbose("resolved %pI via controller: stepmgr=%s, JobId=%u",
+		target, host, info->job_id);
+	slurm_free_job_info_msg(resp);
+	return host;
+}
+
+/*
+ * Resolve an array-task's stepmgr from env vars when SLURM_ARRAY_* match.
+ *
+ * IN/OUT target - target->job_id is overwritten with the per-task job_id.
+ * RET xmalloc()'d hostname string, or NULL on any mismatch / missing var.
+ */
+static char *_array_task_env_stepmgr(slurm_step_id_t *target)
+{
+	const char *array_jid_env = getenv("SLURM_ARRAY_JOB_ID");
+	const char *array_tid_env = getenv("SLURM_ARRAY_TASK_ID");
+	const char *jid_env = getenv("SLURM_JOB_ID");
+	const char *stepmgr = getenv("SLURM_STEPMGR");
+	unsigned long ajid = 0, atid = 0, jid = 0;
+	char *end = NULL;
+
+	if (!array_jid_env || !*array_jid_env || !array_tid_env ||
+	    !*array_tid_env || !jid_env || !*jid_env || !stepmgr || !*stepmgr)
+		return NULL;
+
+	/* Check if SLURM_ARRAY_JOB_ID matches */
+	errno = 0;
+	ajid = strtoul(array_jid_env, &end, 10);
+	if (errno || *end || (ajid != opt.array_job_id))
+		return NULL;
+
+	/* Check if SLURM_ARRAY_TASK_ID matches */
+	errno = 0;
+	atid = strtoul(array_tid_env, &end, 10);
+	if (errno || *end || (atid != opt.array_task_id))
+		return NULL;
+
+	/* Check if SLURM_JOB_ID matches */
+	errno = 0;
+	jid = strtoul(jid_env, &end, 10);
+	if (errno || *end || !jid || (jid >= MAX_VAL))
+		return NULL;
+
+	target->job_id = (uint32_t) jid;
+	verbose("resolved array task %u_%u via env: stepmgr=%s, JobId=%lu",
+		opt.array_job_id, opt.array_task_id, stepmgr, jid);
+	return xstrdup(stepmgr);
+}
+
+/*
+ * Resolve the job stepmgr
+ *
+ * IN/OUT target - step_id selecting the job; job_id is overwritten
+ *                 with the per-task id for array-task input.
+ * RET xmalloc()'d hostname string; caller must xfree() it.
+ */
+static char *_resolve_stepmgr(slurm_step_id_t *target)
+{
+	const char *stepmgr;
+
+	/*
+	 * The stepmgr node that we want to talk to might not be the one in
+	 * SLURM_STEPMGR. Double check that the target job matches what the
+	 * environment says before trusting SLURM_STEPMGR env var. If there's a
+	 * mismatch, resolve stepmgr via ctld.
+	 */
+
+	/* Check if SLURM_ARRAY_TASK_ID/SLURM_ARRAY_TASK_JOB_ID match target */
+	if (opt.array_task_id != NO_VAL) {
+		char *host = _array_task_env_stepmgr(target);
+		if (host)
+			return host;
+		goto resolve_via_ctld;
+	}
+
+	/* Check if SLURM_JOB_SLUID matches target */
+	if (target->sluid) {
+		const char *sluid_env = getenv("SLURM_JOB_SLUID");
+		if (!sluid_env || !*sluid_env ||
+		    (str2sluid(sluid_env) != target->sluid))
+			goto resolve_via_ctld;
+		stepmgr = getenv("SLURM_STEPMGR");
+		if (!stepmgr || !*stepmgr)
+			goto resolve_via_ctld;
+		verbose("resolved stepmgr via SLURM_STEPMGR env (SLUID match): %s",
+			stepmgr);
+		return xstrdup(stepmgr);
+	}
+
+	/* Check if SLURM_JOB_ID matches target */
+	if (target->job_id != NO_VAL) {
+		const char *jobid_env = getenv("SLURM_JOB_ID");
+		unsigned long parsed;
+		char *end = NULL;
+
+		if (!jobid_env || !*jobid_env)
+			goto resolve_via_ctld;
+		errno = 0;
+		parsed = strtoul(jobid_env, &end, 10);
+		if (errno || *end || !parsed || (parsed >= MAX_VAL) ||
+		    (parsed != target->job_id))
+			goto resolve_via_ctld;
+		stepmgr = getenv("SLURM_STEPMGR");
+		if (!stepmgr || !*stepmgr)
+			goto resolve_via_ctld;
+		verbose("resolved stepmgr via SLURM_STEPMGR env (JobId match): %s",
+			stepmgr);
+		return xstrdup(stepmgr);
+	}
+
+resolve_via_ctld:
+	debug("falling back to controller for stepmgr resolution");
+	return _resolve_stepmgr_via_ctld(target);
+}
+
+/*
+ * Serialize one notification body to stdout via the data_parser plugin
+ * (DATA_PARSER_SRUN_STEPS_DRAINED_MSG), as a compact JSON object on one line
+ * (--json) or a YAML document (--yaml). No-op under --quiet or no body.
+ * IN body - notification body (per-step result or whole-set drain terminator)
+ * IN dump_parser_str - resolved data_parser/<ver>[+flags] string naming the
+ *	plugin main()'s pre-flight validated; NULL falls back to the
+ *	compiled-in default
+ */
+static void _print_serialized(srun_steps_drained_msg_t *body,
+			      const char *dump_parser_str)
+{
+	char *out = NULL;
+	int rc;
+
+	if (opt.quiet || !body)
+		return;
+
+	slurm_mutex_lock(&print_lock);
+	rc = SERCLI_DUMP_STR(SRUN_STEPS_DRAINED_MSG, NULL, *body, out,
+			     _dump_mime_type(), SER_FLAGS_COMPACT,
+			     dump_parser_str);
+	if (rc || !out)
+		dump_failed = true;
+	else {
+		printf("%s\n", out);
+		fflush(stdout);
+	}
+	slurm_mutex_unlock(&print_lock);
+
+	xfree(out);
+}
+
+/*
+ * Print one step's completion to stdout unless --quiet.
+ * IN body - per-step notification body (exit_code NO_VAL means never-launched)
+ */
+static void _print_step(srun_steps_drained_msg_t *body)
+{
+	char *line = NULL;
+	char id_str[64];
+	uint16_t exit_status = 0, term_sig = 0;
+	bool launched = false;
+	const char *reason = NULL;
+
+	if (opt.quiet || !body)
+		return;
+
+	if (opt.json || opt.yaml) {
+		_print_serialized(body, dump_parser_str);
+		return;
+	}
+
+	launched = (body->exit_code != NO_VAL);
+	if (launched)
+		exit_code_decode(body->exit_code, &exit_status, &term_sig);
+
+	/*
+	 * Show a reason only for a terminal-failure state (job states past
+	 * JOB_COMPLETE, e.g. NODE_FAIL, TIMEOUT); a normally-completed step
+	 * has none.
+	 */
+	if ((body->state & JOB_STATE_BASE) > JOB_COMPLETE)
+		reason = job_state_string(body->state & JOB_STATE_BASE);
+
+	log_build_step_id_str(&body->step_id, id_str, sizeof(id_str),
+			      STEP_ID_FLAG_NONE);
+	line = xstrdup(id_str);
+	if (launched)
+		xstrfmtcat(line, " code=%u:%u", exit_status, term_sig);
+	else
+		xstrcat(line, " never-launched");
+	if (reason)
+		xstrfmtcat(line, " reason=%s", reason);
+
+	printf("%s\n", line);
+	fflush(stdout);
+	xfree(line);
+}
+
+/*
+ * Print the whole-set drain summary to stdout unless --quiet.
+ * IN body - drain terminator body; body->step_id.job_id identifies the job
+ */
+static void _print_drain(srun_steps_drained_msg_t *body)
+{
+	uint32_t job_id = body ? body->step_id.job_id : 0;
+
+	if (opt.quiet)
+		return;
+
+	/* A pre-26.11 stepmgr sends no body, so job_id unpacks as 0. */
+	if (!job_id && (opt.target.job_id != NO_VAL))
+		job_id = opt.target.job_id;
+
+	if (opt.json || opt.yaml) {
+		srun_steps_drained_msg_t resolved;
+
+		if (!body)
+			return;
+		resolved = *body;
+		resolved.step_id.job_id = job_id;
+		_print_serialized(&resolved, dump_parser_str);
+		return;
+	}
+
+	if (job_id) {
+		printf("JobId=%u steps drained\n", job_id);
+	} else {
+		slurm_step_id_t id = opt.target;
+		char id_str[64];
+
+		id.step_id = NO_VAL; /* render the job, not the step target */
+		log_build_step_id_str(&id, id_str, sizeof(id_str),
+				      STEP_ID_FLAG_NONE);
+		printf("%s steps drained\n", id_str);
+	}
+}
+
+/*
+ * conmgr on-message callback: authenticate, dispatch on msg_type, free msg.
+ * On SRUN_STEPS_DRAINED, renders the completion(s) per mode; in --follow (ALL)
+ * mode it prints each step and keeps waiting until the whole-set drain, which
+ * sets exit_decided and requests conmgr shutdown.
+ * IN args      - conmgr callback args
+ * IN msg       - unpacked message; freed before return
+ * IN unpack_rc - non-zero if message unpack failed
+ * IN arg       - unused
+ * RET SLURM_SUCCESS, SLURM_PROTOCOL_AUTHENTICATION_ERROR, or unpack_rc
+ */
+static int _on_msg(conmgr_callback_args_t args, slurm_msg_t *msg, int unpack_rc,
+		   void *arg)
+{
+	int rc = SLURM_SUCCESS;
+
+	if (unpack_rc) {
+		if (unpack_rc == SLURM_PROTOCOL_AUTHENTICATION_ERROR)
+			debug("swait: dropping unauthenticated RPC");
+		else
+			debug("swait: dropping malformed RPC: %s",
+			      slurm_strerror(unpack_rc));
+		rc = unpack_rc;
+		goto out;
+	}
+
+	if (!msg->auth.ids_set || !validate_internal_msg(msg)) {
+		debug("swait: dropping %s from %pu",
+		      rpc_num2string(msg->msg_type), &msg->auth);
+		rc = SLURM_PROTOCOL_AUTHENTICATION_ERROR;
+		goto out;
+	}
+
+	switch (msg->msg_type) {
+	case SRUN_STEPS_DRAINED:
+	{
+		srun_steps_drained_msg_t *body = msg->data;
+		bool unobserved = false;
+
+		if ((opt.mode == STEPS_DRAINED_SUB_ALL) && body &&
+		    (body->step_id.step_id != NO_VAL)) {
+			_print_step(body);
+			break;
+		}
+
+		if (opt.mode != STEPS_DRAINED_SUB_STEP) {
+			_print_drain(body);
+		} else if (body && (body->step_id.step_id != NO_VAL)) {
+			_print_step(body);
+		} else {
+			/*
+			 * The set drained without the target being reported:
+			 * it never launched, or it ended and was reaped before
+			 * the subscribe. No result was recorded, so print none
+			 * and let the exit code carry it.
+			 */
+			verbose("%ps was not reported before the set drained",
+				&opt.target);
+			unobserved = true;
+		}
+
+		verbose("wait satisfied; shutting down");
+		slurm_mutex_lock(&exit_lock);
+		if (!exit_decided) {
+			exit_decided = true;
+			if (unobserved)
+				exit_rc = SWAIT_RC_UNOBSERVED;
+		}
+		slurm_mutex_unlock(&exit_lock);
+		conmgr_request_shutdown();
+		break;
+	}
+	default:
+		debug("swait: unexpected msg type %d/%s",
+		      msg->msg_type, rpc_num2string(msg->msg_type));
+		break;
+	}
+
+out:
+	slurm_free_msg(msg);
+	return rc;
+}
+
+/*
+ * One-shot --timeout deadline: sets SWAIT_RC_TIMEOUT and requests shutdown.
+ * IN args - conmgr callback args
+ * IN arg  - unused
+ */
+static void _timeout_fire(conmgr_callback_args_t args, void *arg)
+{
+	if (args.status == CONMGR_WORK_STATUS_CANCELLED)
+		return;
+
+	slurm_mutex_lock(&exit_lock);
+	if (exit_decided) {
+		slurm_mutex_unlock(&exit_lock);
+		return;
+	}
+	exit_decided = true;
+	exit_rc = SWAIT_RC_TIMEOUT;
+	slurm_mutex_unlock(&exit_lock);
+
+	error("timed out after %u seconds", opt.timeout);
+	conmgr_request_shutdown();
+}
+
+static void *_on_connection(conmgr_callback_args_t conmgr_args, void *arg)
+{
+	log_flag(NET, "%s: [%s] new connection",
+		 __func__, conmgr_con_get_name(conmgr_args.ref));
+
+	return conmgr_args.con;
+}
+
+/*
+ * Send REQUEST_STEPS_DRAINED_SUBSCRIBE to the stepmgr at node.
+ * IN node - hostname of the stepmgr stepd
+ * IN host - listener hostname swait advertised
+ * IN port - listener port swait advertised
+ * IN cert - swait's TLS certificate, or NULL when TLS is off
+ * RET SLURM_SUCCESS, ESLURM_STEPS_DRAINED (no blocking steps; fast-return),
+ *     EAGAIN (subscriber slots full), or another error code on failure
+ */
+static int _send_subscribe(const char *node, const char *host, uint16_t port,
+			   const char *cert)
+{
+	slurm_msg_t req_msg, resp_msg;
+	steps_drained_sub_msg_t data;
+	int rc = SLURM_SUCCESS;
+
+	slurm_msg_t_init(&req_msg);
+	slurm_msg_t_init(&resp_msg);
+	slurm_msg_set_r_uid(&req_msg, slurm_conf.slurmd_user_id);
+
+	if (slurm_conf_get_remote_addr((char *) node, &req_msg.address, 0)) {
+		rc = errno ? errno : SLURM_ERROR;
+		goto cleanup;
+	}
+
+	data = (steps_drained_sub_msg_t) {
+		.host = (char *) host,
+		.mode = opt.mode,
+		.port = port,
+		.step_id = opt.target,
+		.tls_cert = (char *) cert,
+	};
+	req_msg.msg_type = REQUEST_STEPS_DRAINED_SUBSCRIBE;
+	req_msg.data = &data;
+
+	debug("sending REQUEST_STEPS_DRAINED_SUBSCRIBE to %s; listener=%s:%u",
+	      node, host, port);
+
+	if (slurm_send_recv_node_msg(&req_msg, &resp_msg, 0)) {
+		rc = SLURM_ERROR;
+		goto cleanup;
+	}
+
+	if (resp_msg.msg_type == RESPONSE_SLURM_RC)
+		rc = ((return_code_msg_t *) resp_msg.data)->return_code;
+	else
+		rc = SLURM_UNEXPECTED_MSG_ERROR;
+
+cleanup:
+	slurm_free_msg_members(&resp_msg);
+	return rc;
+}
+
+/*
+ * Set up listener to receive SRUN_STEPS_DRAINED from stepmgr
+ *
+ * RET SLURM_SUCCESS on success, ESLURM_STEPS_DRAINED if the job has no
+ *	running or pending steps (nothing to wait for), or other non-zero
+ *	error.
+ */
+static int _setup_steps_drained_listener(void)
+{
+	static const conmgr_events_t swait_events = {
+		.on_connection = _on_connection,
+		.on_msg = _on_msg,
+	};
+	conmgr_con_flags_t flags = CON_FLAG_NONE;
+	char *host = NULL;
+	char *cert = NULL;
+	uint16_t port = 0;
+	int fd = -1;
+	int rc = SLURM_ERROR;
+	char hostname[HOST_NAME_MAX + 1];
+
+	/* Create listening socket that stepmgr can talk to */
+	if (gethostname(hostname, sizeof(hostname))) {
+		error("swait: gethostname failed: %m");
+		return errno ? errno : SLURM_ERROR;
+	}
+	host = xstrdup(hostname);
+	if ((rc = slurm_init_msg_engine_srun_ports(&fd, &port))) {
+		error("swait: unable to open listen socket: %m");
+		goto fail;
+	}
+	verbose("listening on %s:%u", host, port);
+
+	if (conn_tls_enabled()) {
+		/* stepmgr will need TLS certificate to trust our "server" */
+		if (!(cert = conn_g_get_own_public_cert())) {
+			error("swait: conn_g_get_own_public_cert failed");
+			rc = SLURM_ERROR;
+			goto fail;
+		}
+	}
+
+	/* Send stepmgr listening socket info so it can talk back to us */
+	if ((rc = _send_subscribe(stepmgr_node, host, port, cert))) {
+		if (rc != ESLURM_STEPS_DRAINED) {
+			error("swait: subscribe RPC failed: %s",
+			      slurm_strerror(rc));
+		}
+		goto fail;
+	}
+	verbose("subscribed to stepmgr %s", stepmgr_node);
+
+	my_host = host;
+	my_cert = cert;
+	my_port = port;
+
+	/* Start waiting for connections from stepmgr on the listening socket */
+	if ((rc = conmgr_process_fd_listen(fd, CON_TYPE_RPC, NULL,
+					   &swait_events, flags, NULL))) {
+		error("swait: conmgr_process_fd_listen failed: %s",
+		      slurm_strerror(rc));
+		my_host = NULL;
+		my_cert = NULL;
+		my_port = 0;
+		goto fail;
+	}
+	/* conmgr owns fd now */
+	fd = -1;
+	return SLURM_SUCCESS;
+
+fail:
+	if (fd >= 0)
+		(void) close(fd);
+	xfree(host);
+	xfree(cert);
+	return rc;
+}
+
+/*
+ * swait entry point.
+ * RET SWAIT_RC_OK, SWAIT_RC_ERROR, SWAIT_RC_TIMEOUT or SWAIT_RC_UNOBSERVED
+ */
+int main(int argc, char **argv)
+{
+	log_options_t log_opts = LOG_OPTS_STDERR_ONLY;
+	int setup_rc;
+
+	log_init("swait", log_opts, SYSLOG_FACILITY_DAEMON, NULL);
+	slurm_init(NULL);
+
+	parse_command_line(argc, argv);
+
+	if (opt.json || opt.yaml)
+		serializer_required(_dump_mime_type());
+
+	if (opt.verbose || opt.quiet) {
+		log_opts.stderr_level += opt.verbose;
+		log_opts.stderr_level -= opt.quiet;
+		log_alter(log_opts, SYSLOG_FACILITY_DAEMON, NULL);
+	}
+
+	/*
+	 * Load before resolving the stepmgr so --json=list and an invalid
+	 * data_parser exit without contacting the controller. A no-op when
+	 * neither --json nor --yaml was given, since _dump_mime_type() is
+	 * then NULL.
+	 */
+	data_parser_load_cli_or_exit(&dump_parser, NULL, argc, argv,
+				     _dump_mime_type(), opt.data_parser);
+
+	/* Fail now rather than once per completion. */
+	if (dump_parser &&
+	    !data_parser_g_resolve_type_string(
+		    dump_parser, DATA_PARSER_SRUN_STEPS_DRAINED_MSG)) {
+		error("%s cannot print step completions; run with %s=list to see the available plugins",
+		      data_parser_get_plugin(dump_parser),
+		      opt.yaml ? "--yaml" : "--json");
+		exit(SWAIT_RC_ERROR);
+	}
+
+	if (dump_parser)
+		dump_parser_str = xstrdup(data_parser_get_plugin(dump_parser));
+
+	stepmgr_node = _resolve_stepmgr(&opt.target);
+
+	workerpool_init(0, SWAIT_WORKERPOOL_THREADS, NULL);
+	conmgr_init(0);
+
+	setup_rc = _setup_steps_drained_listener();
+	if (setup_rc == ESLURM_STEPS_DRAINED) {
+		/* No result is recorded once a step is reaped, so print none. */
+		verbose("target already ended; exiting without waiting");
+		if (opt.mode == STEPS_DRAINED_SUB_STEP)
+			exit_rc = SWAIT_RC_UNOBSERVED;
+	} else if (setup_rc == EAGAIN) {
+		error("stepmgr %s subscriber slots full; try again later",
+		      stepmgr_node);
+		exit_rc = SWAIT_RC_ERROR;
+	} else if (setup_rc) {
+		error("subscribe to stepmgr %s failed: %s",
+		      stepmgr_node, slurm_strerror(setup_rc));
+		exit_rc = SWAIT_RC_ERROR;
+	} else {
+		if (opt.timeout > 0) {
+			verbose("waiting for steps to drain (timeout %us)",
+				opt.timeout);
+			conmgr_add_work_delayed_fifo(_timeout_fire, NULL,
+						     opt.timeout, 0);
+		} else {
+			verbose("waiting for steps to drain (no timeout)");
+		}
+		conmgr_run(true);
+	}
+
+	/* A completion we could not serialize is an error, not a clean wait. */
+	slurm_mutex_lock(&print_lock);
+	if (dump_failed && !exit_rc)
+		exit_rc = SWAIT_RC_ERROR;
+	slurm_mutex_unlock(&print_lock);
+
+	verbose("exiting rc=%d", exit_rc);
+	conmgr_fini();
+	workerpool_fini();
+
+	if (opt.json || opt.yaml) {
+		data_parser_cli_free_ctxt(&dump_parser);
+		serializer_g_fini();
+	}
+
+#ifdef MEMORY_LEAK_DEBUG
+	xfree(dump_parser_str);
+	xfree(stepmgr_node);
+	xfree(my_host);
+	xfree(my_cert);
+	slurm_fini();
+#endif /* MEMORY_LEAK_DEBUG */
+
+	return exit_rc;
+}

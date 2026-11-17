@@ -1,0 +1,572 @@
+/*****************************************************************************\
+ *  slurmd_common.c - functions for determining job status
+ *****************************************************************************
+ *  Copyright (C) SchedMD LLC.
+ *
+ *  This file is part of Slurm, a resource management program.
+ *  For details, see <https://slurm.schedmd.com/>.
+ *  Please also read the included file: DISCLAIMER.
+ *
+ *  Slurm is free software; you can redistribute it and/or modify it under
+ *  the terms of the GNU General Public License as published by the Free
+ *  Software Foundation; either version 2 of the License, or (at your option)
+ *  any later version.
+ *
+ *  In addition, as a special exception, the copyright holders give permission
+ *  to link the code of portions of this program with the OpenSSL library under
+ *  certain conditions as described in each individual source file, and
+ *  distribute linked combinations including the two. You must obey the GNU
+ *  General Public License in all respects for all of the code used other than
+ *  OpenSSL. If you modify file(s) with this exception, you may extend this
+ *  exception to your version of the file(s), but you are not obligated to do
+ *  so. If you do not wish to do so, delete this exception statement from your
+ *  version.  If you delete this exception statement from all source files in
+ *  the program, then also delete it here.
+ *
+ *  Slurm is distributed in the hope that it will be useful, but WITHOUT ANY
+ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ *  FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ *  details.
+ *
+ *  You should have received a copy of the GNU General Public License along
+ *  with Slurm; if not, write to the Free Software Foundation, Inc.,
+ *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA.
+\*****************************************************************************/
+
+#include "src/common/read_config.h"
+#include "src/common/slurm_time.h"
+#include "src/common/stepd_api.h"
+#include "src/common/threadpool.h"
+#include "src/common/xstring.h"
+
+#include "src/conmgr/conmgr.h"
+
+#include "src/interfaces/cred.h"
+#include "src/interfaces/hres.h"
+#include "src/interfaces/prep.h"
+
+#include "src/slurmd/common/slurmd_common.h"
+#include "src/slurmd/slurmd/slurmd.h"
+
+#define EPILOG_SYNC_MIN_HOSTS 64
+
+typedef struct {
+	uint32_t job_id;
+	uint16_t msg_timeout;
+	bool *prolog_fini;
+	pthread_cond_t *timer_cond;
+	pthread_mutex_t *timer_mutex;
+} timer_struct_t;
+
+static pthread_mutex_t prolog_serial_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * Delay a message based upon the host index, total host count and
+ * usec_per_rpc.
+ * This logic depends upon synchronized clocks across the cluster.
+ */
+static void _delay_rpc(int host_inx, int host_cnt, uint32_t usec_per_rpc)
+{
+	struct timeval tv1;
+	uint32_t cur_time;	/* current time in usec (just 9 digits) */
+	uint32_t tot_time;	/* total time expected for all RPCs */
+	uint32_t offset_time;	/* relative time within tot_time */
+	uint32_t target_time;	/* desired time to issue the RPC */
+	uint32_t delta_time;
+
+	if ((usec_per_rpc == 0) || (usec_per_rpc > EPILOG_MSG_TIME_MAX)) {
+		error("%s: invalid usec_per_rpc=%u, using default %u",
+		      __func__, usec_per_rpc, DEFAULT_EPILOG_MSG_TIME);
+		usec_per_rpc = DEFAULT_EPILOG_MSG_TIME;
+	}
+again:
+	if (gettimeofday(&tv1, NULL)) {
+		usleep(host_inx * usec_per_rpc);
+		return;
+	}
+
+	cur_time = ((tv1.tv_sec % 1000) * 1000000) + tv1.tv_usec;
+	tot_time = host_cnt * usec_per_rpc;
+	offset_time = cur_time % tot_time;
+	target_time = host_inx * usec_per_rpc;
+
+	if (target_time < offset_time)
+		delta_time = target_time - offset_time + tot_time;
+	else
+		delta_time = target_time - offset_time;
+
+	if (usleep(delta_time)) {
+		if (errno == EINVAL) /* usleep for more than 1 sec */
+			usleep(900000);
+		/* errno == EINTR */
+		goto again;
+	}
+}
+
+/*
+ * On a parallel job, every slurmd may send the EPILOG_COMPLETE message to the
+ * slurmctld at the same time, resulting in lost messages. We add a delay here
+ * to spread out the message traffic assuming synchronized clocks across the
+ * cluster. Delay per host is controlled by EpilogMsgTime (usec).
+ */
+static void _sync_messages_kill(char *node_list)
+{
+	int host_cnt, host_inx;
+	char *host;
+	hostset_t *hosts;
+
+	hosts = hostset_create(node_list);
+	host_cnt = hostset_count(hosts);
+	if (host_cnt <= EPILOG_SYNC_MIN_HOSTS)
+		goto fini;
+	if (!conf->hostname)
+		goto fini;	/* should never happen */
+
+	for (host_inx = 0; host_inx < host_cnt; host_inx++) {
+		host = hostset_shift(hosts);
+		if (!host)
+			break;
+		if (!xstrcmp(host, conf->node_name)) {
+			xfree(host);
+			break;
+		}
+		xfree(host);
+	}
+
+	_delay_rpc(host_inx, host_cnt, slurm_conf.epilog_msg_time);
+
+fini:
+	hostset_destroy(hosts);
+}
+
+
+/*
+ * Send epilog complete message to currently active controller.
+ * Returns SLURM_SUCCESS if message sent successfully,
+ *         SLURM_ERROR if epilog complete message fails to be sent.
+ */
+extern int epilog_complete(slurm_step_id_t *step_id, char *node_list, int rc)
+{
+	slurm_msg_t msg;
+	epilog_complete_msg_t req;
+	int ctld_rc;
+
+	_sync_messages_kill(node_list);
+	slurm_msg_t_init(&msg);
+	memset(&req, 0, sizeof(req));
+
+	req.step_id = *step_id;
+	req.return_code = rc;
+	req.node_name = conf->node_name;
+
+	msg.msg_type = MESSAGE_EPILOG_COMPLETE;
+	msg.data = &req;
+
+	/*
+	 * Note: Return code is only used within the communication layer
+	 * to back off the send. No other return code should be seen here.
+	 * slurmctld will resend TERMINATE_JOB request if message send fails.
+	 */
+	if (slurm_send_recv_controller_rc_msg(&msg, &ctld_rc,
+					      working_cluster_rec) < 0) {
+		error("Unable to send epilog complete message: %m");
+		return SLURM_ERROR;
+	}
+
+	debug("%pI: sent epilog complete msg: rc = %d", step_id, rc);
+
+	return SLURM_SUCCESS;
+}
+
+static bool _is_job_running(slurm_step_id_t *step_id, bool ignore_extern)
+{
+	bool retval = false;
+	list_t *steps;
+	list_itr_t *i;
+	step_loc_t *s = NULL;
+
+	steps = stepd_available(conf->spooldir, conf->node_name);
+	i = list_iterator_create(steps);
+	while ((s = list_next(i))) {
+		int fd;
+		if (s->step_id.job_id != step_id->job_id)
+			continue;
+		if (ignore_extern && (s->step_id.step_id == SLURM_EXTERN_CONT))
+			continue;
+
+		fd = stepd_connect(s->directory, s->nodename,
+				   &s->step_id, &s->protocol_version);
+		if (fd == -1)
+			continue;
+
+		if (stepd_state(fd, s->protocol_version)
+		    != SLURMSTEPD_NOT_RUNNING) {
+			retval = true;
+			close(fd);
+			break;
+		}
+		close(fd);
+	}
+	list_iterator_destroy(i);
+	FREE_NULL_LIST(steps);
+
+	return retval;
+}
+
+/*
+ *  Wait for up to max_time seconds.
+ *  If max_time == 0, send SIGKILL to tasks repeatedly
+ *
+ *  Returns true if all job processes are gone
+ */
+extern bool pause_for_job_completion(slurm_step_id_t *step_id, int max_time,
+				     bool ignore_extern, bool skip_on_shutdown)
+{
+	int sec = 0;
+	int pause = 1;
+	bool rc = false;
+	int count = 0;
+	const timespec_t start = timespec_now();
+
+	while ((sec < max_time) || (max_time == 0)) {
+		rc = _is_job_running(step_id, ignore_extern);
+		if (!rc)
+			break;
+		/*
+		 * If slurmd is shutting down, stop waiting for the step so
+		 * the terminate/abort handler can return and slurmd can
+		 * exit. The step's slurmstepd survives slurmd and delivers
+		 * its completion once slurmctld is back.
+		 * Only slurmd's handlers set skip_on_shutdown; slurmstepd's
+		 * callers pass false (it also links conmgr and requests a
+		 * conmgr shutdown on its own signals, so this must not key
+		 * off conmgr_is_shutdown() alone there).
+		 */
+		if (skip_on_shutdown && conmgr_is_shutdown()) {
+			debug("Waited %s for %pI; slurmd shutting down",
+			      TIMESPEC_ELAPSED_STR(start), step_id);
+			break;
+		}
+		if ((max_time == 0) && (sec > 1)) {
+			terminate_all_steps(step_id, true, !ignore_extern);
+		}
+		if (sec > 10) {
+			debug("Still waiting for %pI to complete: %s",
+			      step_id, TIMESPEC_ELAPSED_STR(start));
+			/* Reduce logging frequency about unkillable tasks */
+			if (max_time)
+				pause = MIN((max_time - sec), 10);
+			else
+				pause = 10;
+		}
+
+		/*
+		 * The job will usually finish up within the first .02 sec.  If
+		 * not gradually increase the sleep until we get to a second.
+		 */
+		if (count == 0) {
+			usleep(20000);
+			count++;
+		} else if (count == 1) {
+			usleep(50000);
+			count++;
+		} else if (count == 2) {
+			usleep(100000);
+			count++;
+		} else if (count == 3) {
+			usleep(500000);
+			count++;
+			sec = 1;
+		} else {
+			sleep(pause);
+			sec += pause;
+		}
+	}
+
+	/*
+	 * Return true if job is NOT running
+	 */
+	return (!rc);
+}
+
+/*
+ * terminate_all_steps - signals the container of all steps of a job
+ * step_id IN - id of job to signal
+ * batch IN - if true signal batch script, otherwise skip it
+ * extern_step IN - if true signal extern step, otherwise skip it
+
+ * RET count of signaled job steps (plus batch script, if applicable)
+ */
+extern int terminate_all_steps(slurm_step_id_t *step_id, bool batch,
+			       bool extern_step)
+{
+	list_t *steps;
+	list_itr_t *i;
+	step_loc_t *stepd;
+	int step_cnt  = 0;
+	int fd;
+
+	steps = stepd_available(conf->spooldir, conf->node_name);
+	i = list_iterator_create(steps);
+	while ((stepd = list_next(i))) {
+		if (stepd->step_id.job_id != step_id->job_id) {
+			/* multiple jobs expected on shared nodes */
+			debug3("Step from other job: %pI (this %pI)",
+			       &stepd->step_id, step_id);
+			continue;
+		}
+
+		if ((stepd->step_id.step_id == SLURM_BATCH_SCRIPT) && !batch)
+			continue;
+		if ((stepd->step_id.step_id == SLURM_EXTERN_CONT) &&
+		    !extern_step)
+			continue;
+
+		step_cnt++;
+
+		fd = stepd_connect(stepd->directory, stepd->nodename,
+				   &stepd->step_id, &stepd->protocol_version);
+		if (fd == -1) {
+			debug3("Unable to connect to %ps", &stepd->step_id);
+			continue;
+		}
+
+		debug2("terminate %ps", &stepd->step_id);
+		if (stepd_terminate(fd, stepd->protocol_version) < 0)
+			debug("kill %ps failed: %m", &stepd->step_id);
+		close(fd);
+	}
+	list_iterator_destroy(i);
+	FREE_NULL_LIST(steps);
+	if (step_cnt == 0)
+		debug2("No steps in %pI to terminate", step_id);
+	return step_cnt;
+}
+
+static void *_prolog_timer(void *x)
+{
+	int delay_time, rc = SLURM_SUCCESS;
+	struct timespec ts;
+	struct timeval now;
+	slurm_msg_t msg;
+	job_notify_msg_t notify_req;
+	char srun_msg[128];
+	timer_struct_t *timer_struct = (timer_struct_t *) x;
+
+	delay_time = MAX(2, (timer_struct->msg_timeout - 2));
+	gettimeofday(&now, NULL);
+	ts.tv_sec = now.tv_sec + delay_time;
+	ts.tv_nsec = now.tv_usec * 1000;
+	slurm_mutex_lock(timer_struct->timer_mutex);
+	if (!(*timer_struct->prolog_fini)) {
+		rc = pthread_cond_timedwait(timer_struct->timer_cond,
+					    timer_struct->timer_mutex, &ts);
+	}
+	slurm_mutex_unlock(timer_struct->timer_mutex);
+
+	if (rc != ETIMEDOUT)
+		return NULL;
+
+	slurm_msg_t_init(&msg);
+	snprintf(srun_msg, sizeof(srun_msg), "Prolog hung on node %s",
+		 conf->node_name);
+	memset(&notify_req, 0, sizeof(notify_req));
+	notify_req.step_id.job_id	= timer_struct->job_id;
+	notify_req.step_id.step_id = NO_VAL;
+	notify_req.step_id.step_het_comp = NO_VAL;
+	notify_req.message	= srun_msg;
+	msg.msg_type	= REQUEST_JOB_NOTIFY;
+	msg.data	= &notify_req;
+	slurm_send_only_controller_msg(&msg, working_cluster_rec);
+	return NULL;
+}
+
+static void _hres_job_from_cred(hres_job_t *hres_job, slurm_cred_t *cred)
+{
+	slurm_cred_arg_t *cred_arg = slurm_cred_get_args(cred);
+
+	hres_job->account = cred_arg->job_account;
+	hres_job->end_time = cred_arg->job_end_time;
+	hres_job->group_id = cred_arg->gid;
+	hres_job->partition = cred_arg->job_partition;
+	hres_job->user_id = cred_arg->uid;
+	hres_job->user_name = cred_arg->id ? cred_arg->id->pw_name : NULL;
+	slurm_cred_unlock_args(cred);
+}
+
+/*
+ * run_prolog - executes and times the prolog script
+ * job_env IN - pointer to the job environment structure
+ * cred IN: pointer to the credential structure
+ *
+ * RET SLURM_SUCCESS, ESLURMD_PROLOG_FAILED or an HRES node prolog error
+ */
+extern int run_prolog(job_env_t *job_env, slurm_cred_t *cred)
+{
+	int diff_time, rc;
+	time_t start_time = time(NULL);
+	pthread_t       timer_id;
+	pthread_cond_t  timer_cond  = PTHREAD_COND_INITIALIZER;
+	pthread_mutex_t timer_mutex = PTHREAD_MUTEX_INITIALIZER;
+	timer_struct_t  timer_struct;
+	bool prolog_fini = false;
+	bool script_lock = false;
+	list_t *hres_prep = slurm_cred_get(cred, CRED_DATA_JOB_HRES_LIST);
+	hres_job_t hres_job = {
+		.nodes = job_env->node_list,
+		.step_id = job_env->step_id,
+	};
+
+	_hres_job_from_cred(&hres_job, cred);
+	rc = hres_g_node_job_prolog(hres_prep, &hres_job);
+	if (rc) {
+		/*
+		 * Only ESLURMD_PROLOG_FAILED drains the node, see
+		 * validate_node_specs().
+		 */
+		if (rc != ESLURM_HRES_REMOTE_FAIL)
+			rc = ESLURMD_PROLOG_FAILED;
+		return rc;
+	}
+
+	if (slurm_conf.prolog_flags & PROLOG_FLAG_SERIAL) {
+		/*
+		 * When PROLOG_FLAG_RUN_IN_JOB is set, PROLOG_FLAG_SERIAL does
+		 * nothing because this function runs in the slurmstepd and
+		 * therefore this mutex doesn't block other jobs from running
+		 * their prolog.
+		 */
+		slurm_mutex_lock(&prolog_serial_mutex);
+		script_lock = true;
+	}
+
+	timer_struct.job_id = job_env->step_id.job_id;
+	timer_struct.msg_timeout = slurm_conf.msg_timeout;
+	timer_struct.prolog_fini = &prolog_fini;
+	timer_struct.timer_cond  = &timer_cond;
+	timer_struct.timer_mutex = &timer_mutex;
+	slurm_thread_create(NULL, &timer_id, _prolog_timer, &timer_struct);
+
+	rc = prep_g_prolog(job_env, cred);
+
+	slurm_mutex_lock(&timer_mutex);
+	prolog_fini = true;
+	slurm_cond_broadcast(&timer_cond);
+	slurm_mutex_unlock(&timer_mutex);
+
+	diff_time = difftime(time(NULL), start_time);
+	if (diff_time >= (slurm_conf.msg_timeout / 2)) {
+		info("prolog for %pI ran for %d seconds",
+		     &job_env->step_id, diff_time);
+	}
+
+	slurm_thread_join(timer_id);
+	if (script_lock)
+		slurm_mutex_unlock(&prolog_serial_mutex);
+
+	if (rc) {
+		int term_sig = 0, exit_status = 0;
+
+		if (WIFSIGNALED(rc))
+			term_sig = WTERMSIG(rc);
+		else if (WIFEXITED(rc))
+			exit_status = WEXITSTATUS(rc);
+		error("%pI prolog failed status=%d:%d", &job_env->step_id,
+		      exit_status, term_sig);
+		rc = ESLURMD_PROLOG_FAILED;
+	}
+
+	return rc;
+}
+
+/*
+ * run_epilog - executes and times the epilog script
+ * job_env IN - pointer to the job environment structure
+ * cred IN: pointer to the credential structure
+ *
+ * RET SLURM_SUCCESS, ESLURMD_EPILOG_FAILED or an HRES node epilog error
+ */
+extern int run_epilog(job_env_t *job_env, slurm_cred_t *cred)
+{
+	time_t start_time = time(NULL);
+	int error_code, diff_time, hres_rc;
+	bool script_lock = false;
+	list_t *hres_prep = NULL;
+	hres_job_t hres_job = {
+		.nodes = job_env->node_list,
+		.step_id = job_env->step_id,
+	};
+
+	if (cred) {
+		hres_prep = slurm_cred_get(cred, CRED_DATA_JOB_HRES_LIST);
+		_hres_job_from_cred(&hres_job, cred);
+	}
+
+	if (slurm_conf.prolog_flags & PROLOG_FLAG_SERIAL) {
+		/*
+		 * When PROLOG_FLAG_RUN_IN_JOB is set, PROLOG_FLAG_SERIAL does
+		 * nothing because this function runs in the slurmstepd and
+		 * therefore this mutex doesn't block other jobs from running
+		 * their epilog.
+		 */
+		slurm_mutex_lock(&prolog_serial_mutex);
+		script_lock = true;
+	}
+
+	error_code = prep_g_epilog(job_env, cred);
+
+	diff_time = difftime(time(NULL), start_time);
+	if (diff_time >= (slurm_conf.msg_timeout / 2)) {
+		info("epilog for %pI ran for %d seconds",
+		     &job_env->step_id, diff_time);
+	}
+
+	if (script_lock)
+		slurm_mutex_unlock(&prolog_serial_mutex);
+
+	/* Runs after the script, even when it failed. */
+	hres_rc = hres_g_node_job_epilog(hres_prep, &hres_job);
+
+	if (error_code) {
+		int term_sig = 0, exit_status = 0;
+
+		if (WIFSIGNALED(error_code))
+			term_sig = WTERMSIG(error_code);
+		else if (WIFEXITED(error_code))
+			exit_status = WEXITSTATUS(error_code);
+		error("%pI epilog failed status=%d:%d", &job_env->step_id,
+		      exit_status, term_sig);
+		return ESLURMD_EPILOG_FAILED;
+	}
+
+	/* job_epilog_complete() drains the node for any non-zero rc. */
+	if (hres_rc && (hres_rc != ESLURM_HRES_REMOTE_FAIL))
+		return ESLURMD_EPILOG_FAILED;
+
+	return SLURM_SUCCESS;
+}
+
+extern int notify_slurmctld_mem_update_fini(slurm_step_id_t *step_id,
+					    uint64_t job_mem_per_node,
+					    int return_code, bool all_nodes)
+{
+	int ret_c, rc;
+	slurm_msg_t resp_msg;
+	response_update_job_mem_msg_t resp = { 0 };
+
+	resp.node_name = conf->node_name;
+	resp.step_id = *step_id;
+	resp.job_mem_per_node = job_mem_per_node;
+	resp.return_code = return_code;
+	resp.all_nodes = all_nodes;
+
+	slurm_msg_t_init(&resp_msg);
+	resp_msg.msg_type = RESPONSE_UPDATE_JOB_MEM;
+	resp_msg.data = &resp;
+
+	if ((ret_c = slurm_send_recv_controller_rc_msg(&resp_msg, &rc,
+						       working_cluster_rec)))
+		error("Error sending memory update completion notification: %m");
+
+	return ret_c;
+}

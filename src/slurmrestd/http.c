@@ -1,0 +1,384 @@
+/*****************************************************************************\
+ *  http.c - handling HTTP
+ *****************************************************************************
+ *  Copyright (C) SchedMD LLC.
+ *
+ *  This file is part of Slurm, a resource management program.
+ *  For details, see <https://slurm.schedmd.com/>.
+ *  Please also read the included file: DISCLAIMER.
+ *
+ *  Slurm is free software; you can redistribute it and/or modify it under
+ *  the terms of the GNU General Public License as published by the Free
+ *  Software Foundation; either version 2 of the License, or (at your option)
+ *  any later version.
+ *
+ *  In addition, as a special exception, the copyright holders give permission
+ *  to link the code of portions of this program with the OpenSSL library under
+ *  certain conditions as described in each individual source file, and
+ *  distribute linked combinations including the two. You must obey the GNU
+ *  General Public License in all respects for all of the code used other than
+ *  OpenSSL. If you modify file(s) with this exception, you may extend this
+ *  exception to your version of the file(s), but you are not obligated to do
+ *  so. If you do not wish to do so, delete this exception statement from your
+ *  version.  If you delete this exception statement from all source files in
+ *  the program, then also delete it here.
+ *
+ *  Slurm is distributed in the hope that it will be useful, but WITHOUT ANY
+ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ *  FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ *  details.
+ *
+ *  You should have received a copy of the GNU General Public License along
+ *  with Slurm; if not, write to the Free Software Foundation, Inc.,
+ *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA.
+\*****************************************************************************/
+
+#include "slurm/slurm_errno.h"
+
+#include "src/common/http.h"
+#include "src/common/http_con.h"
+#include "src/common/http_mime.h"
+#include "src/common/http_router.h"
+#include "src/common/log.h"
+#include "src/common/pack.h"
+#include "src/common/probes.h"
+#include "src/common/read_config.h"
+#include "src/common/xassert.h"
+#include "src/common/xmalloc.h"
+#include "src/common/xstring.h"
+
+#include "src/interfaces/http_auth.h"
+
+#include "src/conmgr/conmgr.h"
+
+#include "src/slurmrestd/http.h"
+#include "src/slurmrestd/operations.h"
+#include "src/slurmrestd/rest_auth.h"
+
+#define MAGIC 0xDFBFFEEF
+
+typedef struct http_context_s {
+	int magic; /* MAGIC */
+	conmgr_fd_ref_t *con;
+	rest_auth_context_t *auth;
+} http_context_t;
+
+static http_con_t *_ctxt_get_hcon(http_context_t *ctxt)
+{
+	http_con_t *hcon = (((void *) ctxt) + sizeof(*ctxt));
+
+	xassert(ctxt->magic == MAGIC);
+
+	return hcon;
+}
+
+extern int send_http_response(http_context_t *context,
+			      const send_http_response_args_t *args)
+{
+	buf_t buffer = SHADOW_BUF_INITIALIZER(args->body, args->body_length);
+
+	xassert(context->magic == MAGIC);
+
+	return http_con_send_response(_ctxt_get_hcon(context),
+				      args->status_code, args->headers,
+				      args->close_header,
+				      (args->body ? &buffer : NULL),
+				      args->body_encoding);
+}
+
+static void _connection_finish(http_context_t *ctxt)
+{
+	xassert(ctxt->magic == MAGIC);
+
+	CONMGR_CON_UNLINK(ctxt->con);
+
+	/* auth should have been released long before now */
+	xassert(!ctxt->auth);
+	FREE_NULL_REST_AUTH(ctxt->auth);
+
+	/* http_con will free() hcon before on_close() */
+	ctxt->magic = ~MAGIC;
+	xfree(ctxt);
+
+	if (inetd_mode)
+		conmgr_request_shutdown();
+}
+
+static int _req_not_found(http_con_t *hcon, const char *name,
+			  const http_con_request_t *request, void *arg,
+			  void *path_arg)
+{
+	static const char body[] =
+		"Unable to find requested URL endpoint. Please query the '/openapi/v3' endpoint or visit 'https://slurm.schedmd.com/rest_api.html' for the OpenAPI specification which includes a list of all possible slurmrestd endpoints.";
+	buf_t buf = SHADOW_BUF_INITIALIZER(body, strlen(body));
+
+	info("%s: [%s] %s %s",
+	     __func__, name, get_http_method_string(request->method),
+	     request->url.path);
+
+	return http_con_send_response(hcon, HTTP_STATUS_CODE_ERROR_NOT_FOUND,
+				      NULL, false, &buf, MIME_TYPE_TEXT);
+}
+
+/*
+ * Latest non-success status_code observed on an HTTP conmgr connection.
+ * slurmrestd inet mode handles a single connection at a time and uses
+ * this to propagate connection-level errors up to the process exit code
+ * (see slurmrestd.c after conmgr_run()).
+ */
+static slurm_err_t last_status_code = SLURM_SUCCESS;
+
+static void _on_close(const char *name, slurm_err_t status_code, void *arg)
+{
+	http_context_t *ctxt = arg;
+
+	xassert(ctxt->magic == MAGIC);
+
+	if (status_code)
+		last_status_code = status_code;
+
+	_connection_finish(ctxt);
+}
+
+static void *_on_connection(conmgr_callback_args_t conmgr_args, void *arg)
+{
+	static const http_con_server_events_t events = {
+		.on_request = http_router_on_request,
+		.on_close = _on_close,
+	};
+	conmgr_fd_t *con = conmgr_args.con;
+	http_context_t *ctxt = NULL;
+
+	xassert(arg == HTTP_CONNECTION_ARG_MAGIC);
+
+	ctxt = xmalloc(sizeof(*ctxt) + http_con_bytes());
+	ctxt->magic = MAGIC;
+	ctxt->con = conmgr_fd_new_ref(con);
+
+	/*
+	 * Assign as HTTP if not already shutting down and close the connection
+	 * on any failure
+	 */
+	if (http_con_assign_server(ctxt->con, _ctxt_get_hcon(ctxt), &events,
+				   ctxt)) {
+		_connection_finish(ctxt);
+		return NULL;
+	}
+
+	return _ctxt_get_hcon(ctxt);
+}
+
+static int _on_data(conmgr_callback_args_t conmgr_args, void *arg)
+{
+	fatal_abort("this should never happen");
+}
+
+extern slurm_err_t http_events_get_last_status_code(void)
+{
+	return last_status_code;
+}
+
+const conmgr_events_t *http_events_get(void)
+{
+	static const conmgr_events_t events = {
+		.on_connection = _on_connection,
+		.on_data = _on_data,
+	};
+
+	return &events;
+}
+
+extern void *http_context_get_auth(http_context_t *context)
+{
+	if (!context)
+		return NULL;
+
+	xassert(context->magic == MAGIC);
+
+	return context->auth;
+}
+
+extern void *http_context_set_auth(http_context_t *context, void *auth)
+{
+	void *old = NULL;
+
+	if (!context)
+		fatal_abort("should never happen");
+
+	xassert(context->magic == MAGIC);
+
+	old = context->auth;
+	context->auth = auth;
+
+	return old;
+}
+
+extern void http_context_free_null_auth(http_context_t *context)
+{
+	if (!context)
+		return;
+
+	xassert(context->magic == MAGIC);
+
+	FREE_NULL_REST_AUTH(context->auth);
+}
+
+static int _req_healthz(http_con_t *hcon, const char *name,
+			const http_con_request_t *request, void *arg,
+			void *path_arg)
+{
+	http_status_code_t status = HTTP_STATUS_CODE_SRVERR_INTERNAL;
+
+	log_flag(NET, "%s: [%s] %s %s",
+		 __func__, name, get_http_method_string(request->method),
+		 request->url.path);
+
+	if (probe_run(false, NULL, NULL, __func__) >= PROBE_RC_ONLINE) {
+		static const char healthy[] = "HEALTHY";
+
+		return http_con_send_response(
+			hcon, HTTP_STATUS_CODE_SUCCESS_OK, NULL, false,
+			&SHADOW_BUF_INITIALIZER(healthy, strlen(healthy)),
+			MIME_TYPE_TEXT);
+	}
+
+	return http_con_send_response(hcon, status, NULL, false, NULL, NULL);
+}
+
+static int _reply_error(http_con_t *hcon, const char *name,
+			const http_con_request_t *request, int err)
+{
+	char *body = NULL, *at = NULL;
+	int rc;
+
+	xstrfmtcatat(body, &at, "slurmrestd HTTP server request for '%s %s':\n",
+		     get_http_method_string(request->method),
+		     request->url.path);
+
+	if (err)
+		xstrfmtcatat(body, &at, "Failed: %s\n", slurm_strerror(err));
+
+	rc = http_con_send_response(hcon, http_status_from_error(err), NULL,
+				    true,
+				    &SHADOW_BUF_INITIALIZER(body, strlen(body)),
+				    MIME_TYPE_TEXT);
+
+	xfree(body);
+	return rc;
+}
+
+static int _auth(http_con_t *hcon, const char *name,
+		 const http_con_request_t *request, void *uid_ptr)
+{
+	int rc = EINVAL;
+
+	if ((rc = http_auth_g_authenticate(HTTP_AUTH_PLUGIN_ANY, uid_ptr, hcon,
+					   name, request))) {
+		(void) _reply_error(hcon, name, request, rc);
+		return rc;
+	}
+
+	return SLURM_SUCCESS;
+}
+
+static int _req_readyz(http_con_t *hcon, const char *name,
+		       const http_con_request_t *request, void *arg,
+		       void *path_arg)
+{
+	static const char ready[] = "READY";
+	const buf_t ready_buf = SHADOW_BUF_INITIALIZER(ready, strlen(ready));
+	http_status_code_t status = HTTP_STATUS_CODE_SRVERR_INTERNAL;
+	const buf_t *reply = NULL;
+	buf_t *body = NULL;
+	int rc = EINVAL;
+
+	log_flag(NET, "%s: [%s] %s %s",
+		 __func__, name, get_http_method_string(request->method),
+		 request->url.path);
+
+	if (!xstrcasecmp(request->url.query, "verbose")) {
+		uid_t uid = SLURM_AUTH_NOBODY;
+
+		/* Authenticate request and close it on any failure */
+		if (_auth(hcon, name, request, &uid))
+			return SLURM_SUCCESS;
+
+		/* Only root and SlurmUser are allowed to view verbose */
+		if (!validate_slurm_user(uid))
+			return _reply_error(hcon, name, request, EPERM);
+
+		body = init_buf(INFINITE);
+	}
+
+	if (probe_run(body, NULL, body, __func__) >= PROBE_RC_READY) {
+		status = HTTP_STATUS_CODE_SUCCESS_OK;
+		if (!body || !get_buf_offset(body))
+			reply = &ready_buf;
+	}
+
+	rc = http_con_send_response(hcon, status, NULL, false,
+				    (reply ? reply : body), MIME_TYPE_TEXT);
+	FREE_NULL_BUFFER(body);
+	return rc;
+}
+
+static int _req_livez(http_con_t *hcon, const char *name,
+		      const http_con_request_t *request, void *arg,
+		      void *path_arg)
+{
+	http_status_code_t status = HTTP_STATUS_CODE_SRVERR_INTERNAL;
+
+	log_flag(NET, "%s: [%s] %s %s",
+		 __func__, name, get_http_method_string(request->method),
+		 request->url.path);
+
+	if (probe_run(false, NULL, NULL, __func__) >= PROBE_RC_ONLINE) {
+		static const char live[] = "LIVE";
+
+		return http_con_send_response(
+			hcon, HTTP_STATUS_CODE_SUCCESS_OK, NULL, false,
+			&SHADOW_BUF_INITIALIZER(live, strlen(live)),
+			MIME_TYPE_TEXT);
+	}
+
+	return http_con_send_response(hcon, status, NULL, false, NULL, NULL);
+}
+
+static int _req_root(http_con_t *hcon, const char *name,
+		     const http_con_request_t *request, void *arg,
+		     void *path_arg)
+{
+	static const char body[] =
+		"Unable to find requested URL endpoint. Please query the '/openapi/v3' endpoint or visit 'https://slurm.schedmd.com/rest_api.html' for the OpenAPI specification which includes a list of all possible slurmrestd endpoints.";
+	buf_t buf = SHADOW_BUF_INITIALIZER(body, strlen(body));
+
+	log_flag(NET, "%s: [%s] %s %s",
+		 __func__, name, get_http_method_string(request->method),
+		 request->url.path);
+
+	return http_con_send_response(hcon, HTTP_STATUS_CODE_ERROR_NOT_FOUND,
+				      NULL, false, &buf, MIME_TYPE_TEXT);
+}
+
+extern void http_init(void)
+{
+	int rc;
+
+	if ((rc = http_auth_g_init(slurm_conf.slurmrestd_http_auth_params, NULL,
+				   NULL)))
+		fatal("http authentication plugins failed to load: %s",
+		      slurm_strerror(rc));
+
+	http_router_init(_req_not_found);
+	http_router_bind(HTTP_REQUEST_GET, "/", _req_root, NULL, NULL);
+	http_router_bind(HTTP_REQUEST_GET, "/healthz", _req_healthz, NULL,
+			 NULL);
+	http_router_bind(HTTP_REQUEST_GET, "/readyz", _req_readyz, NULL, NULL);
+	http_router_bind(HTTP_REQUEST_GET, "/livez", _req_livez, NULL, NULL);
+}
+
+extern void http_fini(void)
+{
+	http_router_fini();
+	http_auth_g_fini();
+}

@@ -1,0 +1,87 @@
+/*****************************************************************************\
+ * src/slurmd/slurmd/req.h - slurmd request handling
+ *****************************************************************************
+ *  Copyright (C) 2002 The Regents of the University of California.
+ *  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
+ *  Written by Mark Grondona <mgrondona@llnl.gov>.
+ *  CODE-OCEC-09-009. All rights reserved.
+ *
+ *  This file is part of Slurm, a resource management program.
+ *  For details, see <https://slurm.schedmd.com/>.
+ *  Please also read the included file: DISCLAIMER.
+ *
+ *  Slurm is free software; you can redistribute it and/or modify it under
+ *  the terms of the GNU General Public License as published by the Free
+ *  Software Foundation; either version 2 of the License, or (at your option)
+ *  any later version.
+ *
+ *  In addition, as a special exception, the copyright holders give permission
+ *  to link the code of portions of this program with the OpenSSL library under
+ *  certain conditions as described in each individual source file, and
+ *  distribute linked combinations including the two. You must obey the GNU
+ *  General Public License in all respects for all of the code used other than
+ *  OpenSSL. If you modify file(s) with this exception, you may extend this
+ *  exception to your version of the file(s), but you are not obligated to do
+ *  so. If you do not wish to do so, delete this exception statement from your
+ *  version.  If you delete this exception statement from all source files in
+ *  the program, then also delete it here.
+ *
+ *  Slurm is distributed in the hope that it will be useful, but WITHOUT ANY
+ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ *  FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ *  details.
+ *
+ *  You should have received a copy of the GNU General Public License along
+ *  with Slurm; if not, write to the Free Software Foundation, Inc.,
+ *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA.
+\*****************************************************************************/
+#ifndef _SLURMD_REQ_H
+#define _SLURMD_REQ_H
+
+#include "src/common/slurm_protocol_defs.h"
+
+#include "src/slurmd/slurmd/slurmd.h"
+
+typedef struct {
+	slurm_msg_type_t msg_type;
+	slurm_auth_level_t auth_level;
+	void (*func)(slurm_msg_t *msg);
+	/*
+	 * Run the handler in a dedicated detached thread instead of on the
+	 * conmgr worker. The framework extracts the fd, then hands msg/conn
+	 * ownership to the detached thread, which runs the handler to
+	 * completion, replies via msg->conn, and frees msg/conn. These
+	 * threads are not counted against MAX_THREADS; their concurrency is
+	 * intentionally unbounded.
+	 */
+	bool new_thread;
+} slurmd_rpc_t;
+
+/*
+ * Process request contained in slurm message `msg' from client at
+ * msg->orig_addr.
+ * IN  msg - the RPC message, or NULL to purge allocated memory.
+ * IN  this_rpc - dispatch entry returned by find_rpc() for msg->msg_type;
+ *	must be non-NULL when msg is non-NULL. Ignored when msg is NULL.
+ */
+extern void slurmd_req(slurm_msg_t *msg, slurmd_rpc_t *this_rpc);
+
+/*
+ * Find RPC dispatch entry matching msg_type.
+ * IN msg_type - RPC type
+ * RET ptr to entry or NULL if not found
+ */
+extern slurmd_rpc_t *find_rpc(slurm_msg_type_t msg_type);
+
+/*
+ * Send the slurmd_conf over a pipe to a child process.
+ */
+extern int send_slurmd_conf_lite(int fd, slurmd_conf_t *cf);
+
+/* Add record for every launched job so we know they are ready for suspend */
+extern void record_launched_jobs(void);
+
+void file_bcast_init(void);
+void file_bcast_purge(void);
+
+#endif

@@ -1,0 +1,696 @@
+<!--#include virtual="header.txt"-->
+
+<h1>Hierarchical Resource (HRES) Scheduling</h1>
+
+<h2 id="overview">Overview<a class="slurm_link" href="#overview"></a></h2>
+
+<p>Hierarchical Resources (HRES) were added in Slurm 25.05 in a <b>Beta</b>
+state. While in beta, the configuration file format and other aspects of this
+feature may undergo substantial changes in future versions and require major
+changes to avoid errors. Sites that utilize this feature while in a beta state
+should pay particularly close attention to changes noted in RELEASE_NOTES and
+the CHANGELOGs when <a href="upgrades.html">upgrading</a>.</p>
+
+<p>Hierarchical Resources allow for <a href="licenses.html">license</a>-like
+resources to be defined as part of independent hierarchical topologies and
+associated with specific nodes. Jobs may request any integer count of that
+resource. Multiple resources may be defined in the configuration (in a
+<a href="resources.yaml.html">resources.yaml</a> file), and will use
+independently defined hierarchies.</p>
+
+<p>Although these hierarchical topologies have some similarities to
+<a href="topology.html">network topologies</a>, the definitions for each are
+completely separate.</p>
+
+<h2 id="modes">Planning Modes<a class="slurm_link" href="#modes"></a></h2>
+
+<p>Three modes of resource planning are provided. In either case, a layer may be
+defined with a count of zero or infinite (<code>count: -1</code>) resources,
+with the impact of this depending on the mode used. Every layer is identified by
+a unique <code>layer_name</code>; <code>nodes</code> and <code>count</code> are
+optional, and <code>count</code> defaults to zero.</p>
+
+<h3 id="mode1">Mode 1<a class="slurm_link" href="#mode1"></a></h3>
+
+<p>In <b>Mode 1</b>, sufficient resources are only required on one layer that
+overlaps with job allocation. In many cases only a single level is needed.
+However, multiple levels may be defined if some additional flexibility in where
+resources are used is preferred, as described in the example below.</p>
+
+<p>A layer with a <b>zero</b> count of a resource will have no impact on
+scheduling. Since that layer will never satisfy the request, it will never alter
+the calculated list of nodes eligible to run a given job. It would be
+semantically equivalent to removing that layer definition.</p>
+
+<p>A layer with an <b>infinite</b> count of a resource will the always allow a
+new job allocation to succeed. Unless prevented due to other requirements, jobs
+will be able to execute immediately.</p>
+
+<p>For example, consider the <b>natural</b> resource defined in the example
+<a href="#resources_yaml">resources.yaml</a> file below. A job that requests
+this resource and is allocated <code>node[01-04]</code> will pull from the pool
+of 100 available to <code>node[01-16]</code>. With a count of 50 specified at
+the higher level (<code>node[01-32]</code>), they can be allocated in addition
+to the resources specified in each group of 16. That is, 100 each would be
+available to each group of 16, and 50 more would be available on any of them,
+for a total of 250 of this resource.</p>
+
+<h3 id="mode2">Mode 2<a class="slurm_link" href="#mode2"></a></h3>
+
+<p>In <b>Mode 2</b>, sufficient resources must be available on all layers on all
+levels that overlap with job allocation. Note that scheduling stalls are
+possible if higher levels do not make enough resources available.</p>
+
+<p>A layer with a <b>zero</b> count of a resource will have a significant impact
+on scheduling. All nodes underneath that layer would never be able to satisfy
+the allocation constraints. This could be used to mark that resource unavailable
+for a specific portion of the cluster, e.g., for hardware maintenance, without
+altering the individual lower-layer resource counts.</p>
+
+<p>A layer with an <b>infinite</b> count of a resource will have no impact on
+scheduling. Since that layer will always satisfy the request, it will never
+constrain execution and would be semantically equivalent to removing that layer
+definition.</p>
+
+<p>For example, consider the <b>flat</b> resource defined in the example
+<a href="#resources_yaml">resources.yaml</a> file below. A job that requests
+this resource and is allocated <code>node[01-04]</code> will pull from all
+levels that include those nodes. So it would pull from the 12 available on
+<code>node[01-08]</code>, from the 16 available on <code>node[01-16]</code>, and
+from the 24 available on <code>node[01-32]</code>. Since the highest level only
+contains 24, that is the maximum that can be allocated, even though a larger
+total is available on lower levels. This example allows a fixed set of resources
+to have some flexibility in where they are used.</p>
+
+<h3 id="mode3">Mode 3<a class="slurm_link" href="#mode3"></a></h3>
+
+<p>In <b>Mode 3</b>, resources are allocated on a per-node basis,
+with the total consumption being calculated from the most granular layer and
+summed up into the successively higher layers.
+This mode is specifically designed for consumable resources like power,
+where the total usage at a higher level (e.g., cluster-wide)
+is the sum of the usage of its components (e.g., chassis level,
+then rack level summing multiple chassis, then datacenter row ).</p>
+
+<p>The scheduler ensures that the total summed resources at every layer
+in the hierarchy do not exceed that layer's defined count.</p>
+
+<p>A job or reservation can request only one <b>Mode 3</b> resource, a request
+for more is rejected.</p>
+
+<p><b>Important Note:</b> Layers defined under <b>Mode 3</b> must be able to be
+represented as a <b>rooted uniform depth tree</b>. Every layer except the root
+names its parent with <code>parent_name</code>, and <code>nodes</code> may only
+be listed on leaf layers. Each parent inherits the union of its children's
+nodes.</p>
+
+<p>For example, consider the <b>power</b> resource defined in the example
+<a href="#resources_yaml">resources.yaml</a> file below. A job that requests
+1000 of the <b>power</b> resource and is allocated <code>node[01-16]</code>
+will pull from all levels that include those nodes.
+So it would pull 8000 from <code>node[01-08]</code>,
+8000 from <code>node[09-16]</code>, 16000 from  <code>node[01-16]</code>, and
+16000 from <code>node[01-32]</code>.</p>
+
+<h4 id="mode3_preemption">Preemption<a class="slurm_link" href="#mode3_preemption"></a></h4>
+
+<p>A pending job can preempt lower-priority running jobs to reclaim a
+<b>Mode 3</b> resource. Because per-node usage is summed into every layer above
+it, a job holding the resource under a shared layer is a preemption candidate
+even when it does not share any nodes with the preemptor.
+Preemption is governed by the usual <b>PreemptType</b> and <b>PreemptMode</b>
+configuration; only the <b>CANCEL</b> and <b>REQUEUE</b> preemption modes are
+supported for <b>Mode 3</b> resources. Preemption to reclaim a hierarchical
+resource is not supported for <b>Mode 1</b> or <b>Mode 2</b> resources.</p>
+
+<h2 id="plugins">Plugins<a class="slurm_link" href="#plugins"></a></h2>
+
+<p>An HRES plugin lets an external service take part in the life of the jobs
+that use a resource, for example to reserve the resource when a job starts,
+pass data to the job's nodes, release the resource when the job ends, and take
+a layer out of service when the service reports a problem. A plugin is enabled
+per resource with the <code>plugin</code> section of
+<a href="resources.yaml.html">resources.yaml</a>. Currently only
+<b>hres/lua</b> is available.</p>
+
+<pre>
+- resource: qpu
+  mode: MODE_1
+  plugin:
+    type: hres/lua
+    config:
+      - name: path
+        value: /etc/slurm/hres_qpu.lua
+    maintenance_cycle: 60
+    maintenance_timeout: 10
+  layers:
+    - layer_name: qpu1
+      nodes:
+        - "node[01-16]"
+      count: 1
+</pre>
+
+<h3 id="plugin_callbacks">Callbacks<a class="slurm_link" href="#plugin_callbacks"></a></h3>
+
+<p>When a job uses several resources with a plugin, the callbacks run in the
+order the resources are defined in <b>resources.yaml</b>, and the epilogs run
+in the reverse order. The pre-runs stop at the first failure, every other
+callback of a kind runs even after one of them fails. A plugin may return
+<code>ESLURM_HRES_REMOTE_FAIL</code> to report that the external service is
+unavailable rather than broken.</p>
+
+<p>The validate arguments, pre-run, revoke, and controller epilog callbacks
+run while slurmctld holds its job lock, which stops scheduling and most
+requests until they return. They must be quick. Slow work belongs in the
+maintenance callback, or in the asynchronous pre-run of
+<a href="#hres_lua">hres/lua</a>.</p>
+
+<table border=1 cellspacing=4 cellpadding=4>
+<tr><th>Callback</th><th>Runs</th><th>On failure</th></tr>
+<tr><td>create context</td>
+<td>slurmctld, for each resource with a plugin when the configuration is
+read. This is before the usage of running jobs is restored, so every layer is
+shown with nothing used</td>
+<td><code>ESLURM_HRES_MAINTENANCE_DISABLE</code> or
+<code>ESLURM_HRES_MAINTENANCE_DOWN</code> disable every layer of the resource,
+any other error is fatal</td></tr>
+<tr><td>destroy context</td>
+<td>slurmctld, before the configuration is read again</td>
+<td>ignored</td></tr>
+<tr><td>maintenance</td>
+<td>slurmctld, every <code>maintenance_cycle</code> seconds, with the current
+state of each layer. The plugin may set or clear <code>disable_layer</code> of
+each layer, the same flag as <code>DisableLayer</code> of
+<code>scontrol update</code>, or mark a layer down to also requeue the running
+jobs that use it. A job that cannot be requeued is cancelled</td>
+<td>logged</td></tr>
+<tr><td>validate arguments</td>
+<td>slurmctld, for each resource of a job's request, with the job's plugin
+arguments, if any, when the job is submitted or its licenses are updated, and
+for a pending job when slurmctld starts or reads its configuration again, or
+when the job is requeued</td>
+<td>any error rejects the request, or holds a pending job</td></tr>
+<tr><td>pre-run</td>
+<td>slurmctld, once the job is scheduled and before its nodes are allocated.
+The plugin may attach a payload that is sent to the job's nodes</td>
+<td><code>ESLURM_HRES_REMOTE_FAIL</code> leaves the job pending, any other
+error holds it with the plugin's message as the reason, or rejects it at
+submission</td></tr>
+<tr><td>revoke</td>
+<td>slurmctld, when the job does not start after its pre-run succeeded, for
+example because the pre-run of another resource failed. The plugin must undo
+what its pre-run did</td>
+<td>logged</td></tr>
+<tr><td>controller epilog</td>
+<td>slurmctld, once the epilogs of all the job's nodes are done and before its
+resources are returned</td>
+<td>logged</td></tr>
+<tr><td>job prolog</td>
+<td>each node of the job where the <b>Prolog</b> runs, once, before it. That is
+every node with <b>PrologFlags=Alloc</b>, otherwise only the nodes that start
+a step</td>
+<td>the job is requeued, or cancelled if it cannot be, for example when it was
+started by <b>srun</b> or <b>salloc</b>. The node is drained unless the error
+is <code>ESLURM_HRES_REMOTE_FAIL</code></td></tr>
+<tr><td>job epilog</td>
+<td>each node of the job, once, after the <b>Epilog</b> script if one is
+configured, even when it failed</td>
+<td>the node is drained unless the error is
+<code>ESLURM_HRES_REMOTE_FAIL</code></td></tr>
+<tr><td>task prolog</td>
+<td>slurmstepd, in each task as root before it starts</td>
+<td>the task fails</td></tr>
+<tr><td>user task prolog</td>
+<td>slurmstepd, in each task as the user, once its standard input and output
+are in place, just before it starts</td>
+<td>the task fails</td></tr>
+<tr><td>task epilog</td>
+<td>slurmstepd, after each task exits</td>
+<td>logged</td></tr>
+</table>
+
+<p>What the nodes receive about each resource is taken when the job starts:
+the resource name, the plugin configuration, the job's plugin arguments, the
+payload from the pre-run, and the layers the job holds, each with the amount
+charged and the job's nodes under it. It does not change while the job runs,
+even if the layers do. It travels in the credential of each job step, which
+<b>srun</b> receives, so the job's user can read the plugin configuration, the
+payload and the arguments. They must not hold secrets.</p>
+
+<h3 id="plugin_args">Plugin Arguments<a class="slurm_link" href="#plugin_args"></a></h3>
+
+<p>A job may pass arguments to the plugin of a resource at the end of its
+request, after the count if one is given. Slurm does not interpret the
+arguments. They are only handed to the plugin, which may reject them:</p>
+
+<pre>sbatch --license='qpu:1[mode=fast,shots=1000]' my_script.sh</pre>
+
+<p>Each argument needs both a name and a value, without whitespace, and a name
+may be given only once. A resource takes one set of arguments. Arguments are
+not allowed for a license that is not a hierarchical resource, or in the
+licenses of a reservation. They are shown in the <b>Licenses</b> and
+<b>LicensesAlloc</b> of the job.</p>
+
+<h3 id="hres_lua">hres/lua<a class="slurm_link" href="#hres_lua"></a></h3>
+
+<p><b>hres/lua</b> runs a Lua script, given by the <code>path</code> entry of
+the plugin <code>config</code>. The script must be available at the same path
+on the controller and on the nodes, and be readable by every user running jobs
+with the resource, because <code>hres_node_user_task_prolog</code> loads it as
+the user. <b>WARNING</b>: Most of its functions run as root or as
+<b>SlurmUser</b>, so the script and every directory on its path must be
+writable only by root. It must define every function below except
+<code>hres_validate_args</code> and
+<code>hres_controller_job_async_prerun</code>, which are optional. Each function
+returns a Slurm return code, such as <code>slurm.SUCCESS</code>,
+<code>slurm.ERROR</code> or <code>slurm.ESLURM_HRES_REMOTE_FAIL</code>. A
+missing or non-numeric return value means success. If the script cannot be
+loaded, for example because a function is missing, the error is logged and the
+callback fails. slurmctld does not start if the script cannot be loaded, and
+later keeps using the last script it loaded, except for
+<code>hres_controller_job_async_prerun</code>, which fails.</p>
+
+<pre>
+hres_create_context(ctx, layers)
+hres_destroy_context(ctx)
+hres_maintenance(ctx, layers)
+hres_validate_args(ctx, args)                    -- optional
+hres_controller_job_prerun(ctx, job, prep)       -- returns rc[, payload]
+hres_controller_job_async_prerun(ctx, job, prep) -- optional, returns rc[, payload]
+hres_controller_job_revoke(ctx, job, prep)
+hres_controller_job_epilog(ctx, job, prep)
+hres_node_job_prolog(prep, job)
+hres_node_job_epilog(prep, job)
+hres_node_task_prolog(prep, job, node_tid, global_tid, env)
+hres_node_task_epilog(prep, job, node_tid, global_tid, env)
+hres_node_user_task_prolog(prep, job, node_tid, global_tid, env)
+</pre>
+
+<p>The arguments are tables:</p>
+
+<ul>
+<li><code>ctx</code>: <code>name</code> of the resource and <code>config</code>,
+the plugin configuration as a <code>name = value</code> table</li>
+<li><code>layers</code>: an array of the resource's layers, each with
+<code>name</code>, <code>nodes</code>, <code>total</code>, <code>used</code> and
+<code>disable_layer</code>. <code>hres_maintenance</code> may set
+<code>disable_layer</code> on a layer to stop allocating from it, and clear it
+to enable the layer again. It may also set <code>down</code>, which is not
+passed in, to disable the layer and requeue its running jobs. This is done on
+every run that sets it, and the layer stays disabled until
+<code>disable_layer</code> is cleared</li>
+<li><code>args</code>: the job's plugin arguments as a
+<code>name = value</code> table, empty when none are given. Without
+<code>hres_validate_args</code> every argument is accepted</li>
+<li><code>job</code>: <code>job_id</code>, <code>sluid</code>,
+<code>user_id</code>, <code>user_name</code>, <code>group_id</code>,
+<code>account</code>, <code>partition</code>, <code>nodes</code> and
+<code>end_time</code>. <code>account</code> is nil when the job has none, and
+<code>user_name</code> may be nil, so use <code>user_id</code> to identify the
+user.
+<code>end_time</code> is the Unix time the job is expected to end, which is one
+year after its start when the job has no time limit.
+<code>hres_controller_job_revoke</code> gets the same expected end as the
+pre-run, although the job does not start.
+<code>hres_controller_job_epilog</code> and <code>hres_node_job_epilog</code>
+get the time the job ended, except that with <b>PrologFlags=RunInJob</b> the
+node job epilog gets the expected end as of the start of the job. The task
+functions get the value from the start of the step, not a later change of the
+time limit</li>
+<li><code>env</code>: the environment of the task, looked up by name, as in
+<code>env.HOME</code>. It cannot be iterated, and setting a field does not
+change the environment. <code>hres_node_task_prolog</code> gets the step's
+environment, before task variables such as <b>SLURM_PROCID</b> are set.
+<code>hres_node_user_task_prolog</code> gets the task's environment as it is
+before <b>TaskProlog</b> runs, and <code>hres_node_task_epilog</code> gets the
+same environment as <b>TaskEpilog</b>. Use <code>node_tid</code> and
+<code>global_tid</code> to identify the task. The user sets these values.
+<b>WARNING</b>: <code>hres_node_task_prolog</code> and
+<code>hres_node_task_epilog</code> run as root, so never use a value from
+<code>env</code> unchecked in a command or in a file path</li>
+<li><code>prep</code>: what the nodes receive about the resource:
+<code>name</code>, <code>config</code>, <code>plugin_args</code> (a
+<code>name = value</code> table), <code>payload</code>,
+<code>async_running</code>, true in the revoke and controller epilog while
+the asynchronous pre-run has not stored its result, and <code>layers</code>,
+an array of the layers the job holds, each with <code>name</code>,
+<code>count</code> and <code>nodes</code></li>
+</ul>
+
+<p>A string returned as the second value of
+<code>hres_controller_job_prerun</code> becomes the payload sent to the job's
+nodes, as <code>prep.payload</code>. When
+<code>hres_controller_job_async_prerun</code> is defined, it runs after the
+pre-run in a separate thread, while the job stays in the <b>CONFIGURING</b>
+state, and its payload, if any, replaces the one from the pre-run. If it fails,
+the job is requeued, or cancelled if it cannot be requeued. If the job's
+nodes are not allocated after all, its result is dropped and
+<code>hres_controller_job_revoke</code> is called. The job is not scheduled
+again until the asynchronous pre-run ends. As the revoke, and the controller
+epilog of a job cancelled while it is <b>CONFIGURING</b>, can run while the
+asynchronous pre-run of the same job is still running, the service must treat
+them as final for that run of the job, identified by <code>job.job_id</code>
+and <code>job.sluid</code>, and refuse or undo a later reservation from it.
+If slurmctld stops without a clean shutdown, or a backup takes over, while the
+asynchronous pre-run is running, its result is lost and the job is requeued,
+or cancelled if it cannot be requeued.</p>
+
+<p>The controller functions of a resource share one Lua state, except
+<code>hres_maintenance</code>, which has a state of its own, and
+<code>hres_controller_job_async_prerun</code>, which gets a new one for each
+call. Globals set by the other functions are not visible to them. A state is
+reloaded when the script changes, which drops its globals without calling
+<code>hres_create_context</code> again. Each node function runs in a new Lua
+state. <code>hres_node_task_prolog</code> and
+<code>hres_node_user_task_prolog</code> run in the task's process, so the
+latter may write to the task's output, flushing it before returning.
+<code>hres_node_task_epilog</code> runs in slurmstepd after the task
+exits.</p>
+
+<p>A node function that runs longer than <b>PrologTimeout</b>, or
+<b>EpilogTimeout</b> for the epilogs, fails with an error and is handled
+like any other failure of that function (see the table above). Both default
+to <b>PrologEpilogTimeout</b>, which is not set by default, so there is no
+limit. The limit only stops Lua code: a function blocked in a command or a
+read, as in <code>os.execute()</code> or <code>io.popen()</code>, is not
+interrupted, so bound such calls in the script, for example with
+<code>timeout(1)</code>.</p>
+
+<pre>
+function hres_controller_job_prerun(ctx, job, prep)
+	slurm.log_info("reserving %s for JobId=%d", prep.name, job.job_id)
+	return slurm.SUCCESS, "token=" .. job.job_id
+end
+
+function hres_node_job_prolog(prep, job)
+	slurm.log_info("JobId=%d payload %s", job.job_id, prep.payload or "")
+	return slurm.SUCCESS
+end
+</pre>
+
+<h2 id="limitations">Limitations<a class="slurm_link" href="#limitations"></a></h2>
+
+<ul>
+<li>This implementation is in a <b>beta</b> state (see
+	<a href="#overview">overview</a>)</li>
+<li>Resource names defined through the hierarchical resources configuration must
+	not conflict with any cluster licenses</li>
+<li>The layer structure (layers, variables, and modes) is static. Changing it
+	requires editing <b>resources.yaml</b> and restarting or reconfiguring
+	(see <a href="#updates">Runtime Updates</a>)</li>
+<li><b>PreemptParameters=reclaim_licenses</b> in <b>slurm.conf</b> applies only
+	to regular licenses, not to HRES. <b>Mode 3</b> resources are instead
+	reclaimed by their own preemption path (see
+	<a href="#mode3_preemption">Preemption</a>)</li>
+<li>Preemption to reclaim a <b>Mode 3</b> resource is only performed by the main
+	scheduler, not during backfill scheduling</li>
+<li>The licenses of a running job that holds or requests an HRES cannot be
+	changed with <b>scontrol update job</b>. Requeue the job and change them
+	while it is pending</li>
+<li>A hierarchical resource cannot be requested with the <code>|</code> form
+	of a license request</li>
+</ul>
+
+<h2 id="examples">Examples<a class="slurm_link" href="#examples"></a></h2>
+
+<p>After defining a resource hierarchy in <b>resources.yaml</b> (see below for
+example), you can interact with these resources in several ways, using the
+syntax already used for licenses:</p>
+
+<ul>
+<li>View HRES<pre>scontrol show license</pre></li>
+<li>Reserve HRES
+<pre>scontrol create reservation account=root licenses=natural(low1):30,flat(low2):4,flat(low4):2</pre>
+Note that the layer must be named for each reserved HRES, using its
+<code>layer_name</code> from <b>resources.yaml</b></li>
+<li>Request HRES on a job
+<pre>sbatch --license=flat:2,natural:1 my_script.sh</pre></li>
+</ul>
+
+<h3 id="resources_yaml">resources.yaml<a class="slurm_link" href="#resources_yaml"></a></h3>
+
+<pre>
+---
+- resource: flat
+  mode: MODE_2
+  layers:
+    - layer_name: top		# highest level
+      nodes:
+        - "node[01-32]"
+      count: 24
+    - layer_name: mid1		# middle levels
+      nodes:
+        - "node[01-16]"
+      count: 16
+    - layer_name: mid2
+      nodes:
+        - "node[17-32]"
+      count: 16
+    - layer_name: low1		# lowest levels
+      nodes:
+        - "node[01-08]"
+      count: 12
+    - layer_name: low2
+      nodes:
+        - "node[09-16]"
+      count: 12
+    - layer_name: low3
+      nodes:
+        - "node[17-24]"
+      count: 12
+    - layer_name: low4
+      nodes:
+        - "node[25-32]"
+      count: 12
+- resource: natural
+  mode: MODE_1
+  layers:
+    - layer_name: top		# highest level
+      nodes:
+        - "node[01-32]"
+      count: 50
+    - layer_name: low1		# lowest levels
+      nodes:
+        - "node[01-16]"
+      count: 100
+    - layer_name: low2
+      nodes:
+        - "node[17-32]"
+      count: 100
+- resource: power
+  mode: MODE_3
+  topology: blok1
+  variables:
+    - name: full_node
+      value: 1000
+    - name: full_gpu_node
+      value: 2000
+  layers:
+    - layer_name: rack1		# leaf layers list nodes
+      parent_name: row1
+      nodes:
+        - "node[01-08]"
+      count: 40000
+      base:
+        - name: storage
+          value: 5000
+    - layer_name: rack3
+      parent_name: row2
+      nodes:
+        - "node[17-24]"
+      count: 40000
+    - layer_name: rack2
+      parent_name: row1
+      nodes:
+        - "node[09-16]"
+      count: 40000
+    - layer_name: rack4
+      parent_name: row2
+      nodes:
+        - "node[25-32]"
+      count: 40000
+    - layer_name: row1		# inherits node[01-16]
+      parent_name: datacenter
+      count: 60000
+      base:
+        - name: network1
+          value: 3000
+    - layer_name: row2		# inherits node[17-32]
+      parent_name: datacenter
+      count: 80000
+      base:
+        - name: network2
+          value: 2000
+    - layer_name: datacenter	# root, inherits node[01-32]
+      count: 130000
+      base:
+        - name: acUnit1
+          value: 10000
+        - name: acUnit2
+          value: 8000
+</pre>
+
+<h2 id="updates">Runtime Updates<a class="slurm_link" href="#updates"></a></h2>
+
+<p>Administrators may change the nodes, count, base, and disabled state of an
+existing layer with <code>scontrol update</code>. A plain <code>Nodes</code>
+list replaces the layer's nodes, while a <code>+</code> or <code>-</code>
+prefix adds or removes nodes. <code>Count</code> is absolute and must not be
+lower than the layer's <b>BaseUsage</b>. <code>Base</code> replaces the whole
+base list, and an empty <code>Base=</code> clears it. In <b>Mode 3</b>,
+<code>Nodes</code> may only be changed on leaf layers. Node and base changes
+are propagated to the ancestors. Running jobs are never affected, so lowering
+a count below the current usage makes new jobs wait until usage drops.</p>
+
+<p>A running job keeps the layers it was charged on, even when those layers
+later gain or lose nodes. The job releases exactly what it took, so changing
+the nodes of a layer under a running job does not distort the usage counts.
+The layers a job holds are shown by the <b>LicensesAlloc</b> field of
+<code>scontrol show job</code>, for example
+<code>power(rack1*1000,row1*1000,datacenter*1000):1000</code>, each layer
+followed by the amount charged on it. In <b>Mode 3</b> that amount grows with
+the number of the job's nodes under the layer, as in <code>rack1*2000</code>
+for two nodes.</p>
+
+<pre>
+scontrol update HRESName=power LayerName=rack2 Nodes=+node[33-36] Count=45000
+scontrol update HRESName=power LayerName=rack1 Base=
+</pre>
+
+<p>The same operation is available through the REST API as
+<code>POST /slurm/v0.0.47/hres/</code> with a JSON body containing
+<code>hres_name</code>, <code>layer_name</code>, and any of <code>nodes</code>,
+<code>count</code>, <code>base</code>, <code>disable_hres</code>, and
+<code>disable_layer</code>.</p>
+
+<p>The layers of a node can also be replaced all at once with
+<code>scontrol update NodeName</code> and <code>HRES</code>. The node is removed
+from every layer that is not listed, so it can be moved to another
+<b>Mode 3</b> leaf with a single command. Every layer the node must stay in has
+to be listed, including the layers of other resources. Run
+<code>scontrol -d show node</code> first to see the current list in the same form.
+<code>HRES='[]'</code> or an empty <code>HRES=</code> removes the node from
+every layer. An invalid value is rejected and changes nothing. scontrol reports
+invalid JSON, and other reasons are written to the slurmctld log.</p>
+
+<p>With the <a href="#resources_yaml">resources.yaml</a> example above, the
+command below moves <code>node05</code> from <code>rack1</code> to
+<code>rack2</code> of <b>power</b> and keeps its <b>flat</b> and <b>natural</b>
+layers.</p>
+
+<pre>
+scontrol update NodeName=node05 HRES='[{"hres_name":"flat","layer_name":"top"},{"hres_name":"flat","layer_name":"mid1"},{"hres_name":"flat","layer_name":"low1"},{"hres_name":"natural","layer_name":"top"},{"hres_name":"natural","layer_name":"low1"},{"hres_name":"power","layer_name":"rack2"}]'
+</pre>
+
+<p>Changes to the nodes of a layer are saved in the slurmctld node state file
+(in <b>StateSaveLocation</b>), and are recovered as follows when slurmctld
+starts or is reconfigured:</p>
+
+<ul>
+<li>Dynamic nodes and cloud nodes keep their saved layers after a restart or
+<code>scontrol reconfigure</code>.</li>
+<li>Other nodes keep their saved layers only when slurmctld is started with
+<code>-R</code> or when a backup slurmctld takes control. A default restart or
+<code>scontrol reconfigure</code> returns them to the layers defined in
+<b>resources.yaml</b>. So when the primary slurmctld resumes control without
+<code>-R</code>, it returns these nodes to their configured layers, even though
+the backup kept their saved layers.</li>
+<li>When a node is powered down, or fails to resume within
+<b>ResumeTimeout</b>, it returns to its configured layers: those in
+<b>resources.yaml</b>, or for a dynamic node, those it was created with. A node
+that is powered down or powering down when slurmctld starts also uses its
+configured layers.</li>
+<li>When a node's saved layers are recovered, they replace its membership in
+every layer defined in <b>resources.yaml</b>. Edits to <b>resources.yaml</b> do
+not change that node's layers until it returns to its configured layers. If a
+saved layer no longer exists or is no longer a leaf layer, all of the node's
+saved changes are discarded and an error is logged.</li>
+</ul>
+
+<p>Changes to the count, base, and disabled state are not saved.
+<b>resources.yaml</b> is read again on the next reconfigure or restart, and
+those changes are lost.</p>
+
+<h3 id="disable">Disabling a Resource<a class="slurm_link" href="#disable"></a></h3>
+
+<p>A resource or a single layer may be switched off without removing it from the
+configuration. <code>DisableHRES</code> applies to every layer of the resource,
+whether or not a layer is named, while <code>DisableLayer</code> applies only to
+the named layer, so jobs may still be allocated resources from the other layers.
+Both accept only <code>true</code> and <code>false</code>. Jobs may still
+request a disabled resource, but they stay pending until it is enabled again.
+A job that no enabled layer can serve pends with the reason
+<code>HRESDisabled</code>.
+Running jobs keep the resources that they already hold. The same fields may be
+set in <b>resources.yaml</b> as <code>disable_hres</code> and
+<code>disable_layer</code>.</p>
+
+<pre>
+scontrol update HRESName=power DisableHRES=true
+scontrol update HRESName=power LayerName=rack1 DisableLayer=true
+</pre>
+
+<h3 id="show">Viewing a Resource<a class="slurm_link" href="#show"></a></h3>
+
+<p><code>scontrol show license</code> prints one entry per layer.</p>
+
+<pre>
+LicenseName=power
+    Total=35000 Used=0 Free=35000 Reserved=0 Remote=no
+    LayerName=rack1 ParentName=row1 Nodes=node[01-08] Mode=3 DisableHRES=false DisableLayer=false ConfTotal=40000 BaseUsage=5000
+    Base=storage:5000
+</pre>
+
+<ul>
+<li><b>LayerName</b>, <b>ParentName</b>: the layer and, when it has one, its
+	parent layer</li>
+<li><b>Mode</b>: the planning mode of the resource</li>
+<li><b>DisableHRES</b>, <b>DisableLayer</b>: whether the resource or the layer
+	is disabled for scheduling</li>
+<li><b>ConfTotal</b>: the count configured for the layer</li>
+<li><b>BaseUsage</b>: the sum of the base values of the layer, plus, in
+	<b>Mode 3</b>, the base usage propagated up from its children</li>
+<li><b>Base</b>: the base name and value pairs, or <code>(null)</code></li>
+<li><b>Total</b>: what is left for jobs, the configured count minus the base
+	usage</li>
+</ul>
+
+<p>With the <code>-d</code> option, <code>scontrol show node</code> prints the
+layers that contain a node in <b>HRES=</b>, a JSON list in the same form as the
+<b>HRES=</b> node parameter.
+For a <b>Mode 3</b> resource, only the leaf layer is listed, not its parent
+layers. With the <a href="#resources_yaml">resources.yaml</a> example above,
+<code>node01</code> lists <code>rack1</code> of <b>power</b>, along with its
+<b>flat</b> and <b>natural</b> layers, but not <code>row1</code> or
+<code>datacenter</code>. A node that is in no layer has no <b>HRES=</b> line.
+The same list is in the <code>hres</code> field of
+<code>GET /slurm/v0.0.46/node/{node_name}</code>, as an array of objects with
+<code>hres_name</code> and <code>layer_name</code>. The array is empty when the
+node is in no layer.
+The <code>hres</code> field of
+<code>POST /slurm/v0.0.46/node/{node_name}</code> takes the same array and sets
+the layers like <code>scontrol update NodeName HRES=</code>.
+An empty array removes the node from every layer.
+The node's layers do not change when the field is left out.</p>
+
+<h2 id="dynamic_nodes">Dynamic Nodes<a class="slurm_link" href="#dynamic_nodes"></a></h2>
+
+<p>Dynamic nodes are not listed in <b>resources.yaml</b>. They name their
+layers when they are created, through the <b>HRES=</b> node parameter, which is
+a JSON list of resource name and layer name pairs. In <b>Mode 3</b> only one
+leaf layer per resource may be given.</p>
+
+<pre>
+scontrol create NodeName=node33 State=cloud HRES='[{"hres_name":"power","layer_name":"rack2"}]'
+slurmd -Z --conf 'HRES=[{"hres_name":"power","layer_name":"rack2"}]'
+</pre>
+
+<p>The node is added to the listed layers and their parents when it is created,
+and removed from all layers when it is deleted. An unknown or unsuitable layer
+creates the node without HRES membership and logs an error. The parameter is
+ignored for nodes defined in <b>slurm.conf</b>. Layers given at creation are
+the node's configured layers. Runtime changes to them are kept across restarts
+until the node is powered down, as described in
+<a href="#updates">Runtime Updates</a>.</p>
+
+<!--#include virtual="footer.txt"-->

@@ -1,0 +1,246 @@
+/*****************************************************************************\
+ *  persist_conn.h - Definitions for communicating over a persistent
+ *                   connection within Slurm.
+ ******************************************************************************
+ *  Copyright (C) SchedMD LLC.
+ *
+ *  This file is part of Slurm, a resource management program.
+ *  For details, see <https://slurm.schedmd.com/>.
+ *  Please also read the included file: DISCLAIMER.
+ *
+ *  Slurm is free software; you can redistribute it and/or modify it under
+ *  the terms of the GNU General Public License as published by the Free
+ *  Software Foundation; either version 2 of the License, or (at your option)
+ *  any later version.
+ *
+ *  In addition, as a special exception, the copyright holders give permission
+ *  to link the code of portions of this program with the OpenSSL library under
+ *  certain conditions as described in each individual source file, and
+ *  distribute linked combinations including the two. You must obey the GNU
+ *  General Public License in all respects for all of the code used other than
+ *  OpenSSL. If you modify file(s) with this exception, you may extend this
+ *  exception to your version of the file(s), but you are not obligated to do
+ *  so. If you do not wish to do so, delete this exception statement from your
+ *  version.  If you delete this exception statement from all source files in
+ *  the program, then also delete it here.
+ *
+ *  Slurm is distributed in the hope that it will be useful, but WITHOUT ANY
+ *  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ *  FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ *  details.
+ *
+ *  You should have received a copy of the GNU General Public License along
+ *  with Slurm; if not, write to the Free Software Foundation, Inc.,
+ *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA.
+\*****************************************************************************/
+#ifndef _SLURM_PERSIST_CONN_H
+#define _SLURM_PERSIST_CONN_H
+
+#include "slurm/slurm.h"
+
+#include "src/common/pack.h"
+#include "src/common/slurm_protocol_defs.h"
+#include "src/conmgr/conmgr.h"
+
+#include "src/interfaces/conn.h"
+
+typedef struct persist_conn_s persist_conn_t;
+typedef struct persist_msg_s persist_msg_t;
+
+struct persist_msg_s {
+	persist_conn_t *pcon; /* persist_conn_t */
+	void *data;		/* pointer to a message type below */
+	uint16_t msg_type;	/* slurmdbd_msg_type_t / slurm_msg_type_t */
+};
+
+typedef int (*persist_conn_callback_proc_t)(void *arg, persist_msg_t *msg,
+					    buf_t **out_buffer);
+
+typedef void (*persist_conn_callback_fini_t)(void *arg);
+
+struct persist_conn_s {
+	slurm_msg_auth_t auth;
+	void *auth_cred;
+	persist_conn_callback_proc_t callback_proc;
+	persist_conn_callback_fini_t callback_fini;
+	char *cluster_name;
+	time_t comm_fail_time;	/* avoid constant error messages */
+	uint16_t my_port;
+	uint16_t flags;
+	bool inited;
+	persist_conn_type_t persist_type;
+	uid_t r_uid;
+	char *rem_host;
+	uint16_t rem_port;
+	time_t *shutdown;
+	pthread_t thread_id;
+	int timeout;
+	conn_t *conn; /* interfaces/conn data */
+	int last_fd; /* most recent fd backing conn, valid while conn != NULL;
+		      * reset to -1 before conn destroy. Lock-free readable
+		      * by external wake/shutdown paths that cannot safely
+		      * deref conn. 0 means never opened. */
+	bool skip_conn_shutdown;
+	slurm_trigger_callbacks_t trigger_callbacks;
+	uint16_t version;
+};
+
+/* setup a daemon to receive incoming persistent connections. */
+extern void slurm_persist_conn_recv_server_init(void);
+
+/* finish up any persistent connections we are listening to */
+extern void slurm_persist_conn_recv_server_fini(void);
+
+/*
+ * Create a thread that will wait listening on the fd in the persist_conn_t.
+ *
+ * IN - persist_conn - persistent connection to listen to.  This will be freed
+ *                     internally, so forget about once it enters here.
+ * IN - thread_loc - location in the persist_conn thread pool.  This number can
+ *                   be got from slurm_persist_conn_wait_for_thread_loc or given
+ *                   -1 to get one inside the function.
+ * IN - arg - arbitrary argument that will be sent to the callback as well as
+ *            the callback in the persist_conn.
+ */
+extern void slurm_persist_conn_recv_thread_init(persist_conn_t *persist_conn,
+						int fd, int thread_loc,
+						void *arg);
+
+/* Increment thread_count and don't return until its value is no larger
+ *	than MAX_THREAD_COUNT,
+ * RET index of free index in persist_pthread_id or -1 to exit */
+extern int slurm_persist_conn_wait_for_thread_loc(void);
+
+/* Free the index given from slurm_persist_conn_wait_for_thread_loc */
+extern void slurm_persist_conn_free_thread_loc(int thread_loc, bool detach);
+
+/* Open a persistent socket connection and sends an init message to establish
+ * the connection.
+ * IN/OUT - persistent connection needing host and port filled in.  Returned
+ * completely filled in.
+ * Returns SLURM_SUCCESS on success or SLURM_ERROR on failure */
+extern int slurm_persist_conn_open(persist_conn_t *persist_conn);
+
+/* Close the persistent connection don't free structure or members */
+extern void slurm_persist_conn_close(persist_conn_t *persist_conn);
+
+extern int slurm_persist_conn_reopen(persist_conn_t *persist_conn);
+
+/* Close the persistent connection members, but don't free structure */
+extern void slurm_persist_conn_members_destroy(persist_conn_t *persist_conn);
+
+/* Close the persistent connection and free structure */
+extern void slurm_persist_conn_destroy(persist_conn_t *persist_conn);
+
+extern int slurm_persist_conn_process_msg(persist_conn_t *persist_conn,
+					  persist_msg_t *persist_msg,
+					  char *msg_char, uint32_t msg_size,
+					  buf_t **out_buffer, bool first);
+
+extern int slurm_persist_conn_writeable(persist_conn_t *persist_conn);
+
+extern int slurm_persist_send_msg(persist_conn_t *persist_conn,
+				  buf_t *buffer);
+extern buf_t *slurm_persist_recv_msg(persist_conn_t *persist_conn);
+
+
+extern buf_t *slurm_persist_msg_pack(persist_conn_t *persist_conn,
+				     persist_msg_t *req_msg);
+extern int slurm_persist_msg_unpack(persist_conn_t *persist_conn,
+				    persist_msg_t *resp_msg, buf_t *buffer);
+
+extern buf_t *slurm_persist_make_rc_msg(persist_conn_t *persist_conn,
+					uint32_t rc, char *comment,
+					uint16_t ret_info);
+
+/* Serve persistent connections over conmgr. */
+
+typedef struct persist_conn_ops persist_conn_ops_t;
+
+#define PERSIST_CONN_CTX_MAGIC 0xC0D2517A
+
+/* Transport and session state of one persistent connection. */
+typedef struct persist_conn_ctx_s {
+	uint32_t magic; /* PERSIST_CONN_CTX_MAGIC */
+	conmgr_fd_ref_t *ref;
+	const persist_conn_ops_t *ops;
+	int fd; /* input fd at accept, for logging and storage ids */
+	char *rem_host; /* peer address */
+
+	/* Identity from REQUEST_PERSIST_INIT */
+	slurm_msg_auth_t auth; /* set at REQUEST_PERSIST_INIT */
+	void *auth_cred; /* owned; destroyed at teardown */
+
+	/* Negotiated at REQUEST_PERSIST_INIT; used to pack and unpack. */
+	uint16_t version;
+
+	/* Peer as described by REQUEST_PERSIST_INIT */
+	char *cluster_name;
+	uint16_t persist_type; /* persist_conn_type_t */
+
+	void *arg; /* caller state given to persist_conn_assign() */
+} persist_conn_ctx_t;
+
+struct persist_conn_ops {
+	/*
+	 * Authenticated REQUEST_PERSIST_INIT. The session is set up, and msg
+	 * is a request like on_msg()'s with persist_init_req_msg_t as data.
+	 * Return SLURM_SUCCESS to accept, or an error to close. persist_conn
+	 * replies with a PERSIST_RC carrying the rc, the negotiated version
+	 * and *reply_flags (PERSIST_FLAG_*).
+	 */
+	int (*on_init)(persist_conn_ctx_t *pcon_ctx, slurm_msg_t *msg,
+		       uint16_t *reply_flags);
+
+	/*
+	 * Message after init, as a slurm_msg_t like any other RPC: the
+	 * session's identity and version, msg_type and data unpacked with
+	 * unpack_slurmdbd_msg(), conmgr_con and pcon_ctx. msg is borrowed;
+	 * persist_conn frees the data. Reply with send_msg_response() or
+	 * slurm_send_rc_msg()/slurm_send_rc_err_msg(), as to any RPC. Access
+	 * denied, authentication and version errors close after the reply.
+	 */
+	int (*on_msg)(persist_conn_ctx_t *pcon_ctx, slurm_msg_t *msg);
+
+	/* Connection closed; free conn->arg. */
+	void (*on_fini)(persist_conn_ctx_t *pcon_ctx);
+};
+
+/*
+ * Initialize msg as a request on conn: its identity, protocol version,
+ * connection and msg->pcon_ctx, flagged SLURM_PERSIST_MSG so replies
+ * are framed for the session. The credential stays with conn.
+ * IN pcon_ctx - persistent connection the request goes over
+ * OUT msg - request to initialize; caller sets msg_type and data
+ */
+extern void persist_conn_msg_init(persist_conn_ctx_t *pcon_ctx,
+				  slurm_msg_t *msg);
+
+/*
+ * Make a connection persistent: replace its events, serve it as
+ * CON_TYPE_RAW with ops until it closes. Its first frame must be
+ * REQUEST_PERSIST_INIT, framed as DBD clients send it.
+ * IN ref - connection; its previous events and arg are no longer called
+ * IN ops - handlers
+ * IN timeouts - timeouts for the session, or NULL to keep the current ones
+ * IN arg - caller state, as conn->arg; on_fini() frees it, even on error
+ * RET SLURM_SUCCESS, or error after which the connection is closing
+ */
+extern int persist_conn_assign(conmgr_fd_ref_t *ref,
+			       const persist_conn_ops_t *ops,
+			       const conmgr_timeouts_t *timeouts, void *arg);
+
+/*
+ * Parse and dispatch buffered frames on a CON_TYPE_RAW connection.
+ * Exposed for tests and callers with their own framing needs.
+ * IN ref - connection with buffered input
+ * IN handler - called with each borrowed payload; return error to stop
+ * IN arg - passed to handler
+ * RET SLURM_SUCCESS or the first parser/handler error
+ */
+typedef int (*persist_conn_frame_handler_t)(conmgr_fd_ref_t *ref, buf_t *frame,
+					    void *arg);
+extern int persist_conn_parse(conmgr_fd_ref_t *ref,
+			      persist_conn_frame_handler_t handler, void *arg);
+
+#endif

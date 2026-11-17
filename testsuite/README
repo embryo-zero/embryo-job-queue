@@ -1,0 +1,1578 @@
+############################################################################
+# Copyright (C) SchedMD LLC.
+############################################################################
+
+The unified test-runner allows all (3) regression testsuites to be run with
+a single command (run-tests). This can include the unit testsuite, the
+expect testsuite and the python testsuite.
+
+Quick Start:
+
+* Configure, build, install and start Slurm
+* cp SRCDIR/testsuite/testsuite.conf.sample SRCDIR/testsuite/testsuite.conf
+* cd SRCDIR/testsuite
+* ./run-tests
+
+To run the testsuites using the unified test-runner:
+
+* Slurm must first be installed, configured and running.
+* The testsuites requires the existence of a testsuite.conf file.
+  A sample configuration file is provided in the source tree
+  (SRCDIR/testsuite/testsuite.conf.sample) which can be used as a starting
+  point for this file. By default, the testsuite.conf file is expected to be
+  found in the testsuite subdirectory of your source directory
+  (SRCDIR/testsuite/testsuite.conf).
+  If placed elsewhere, you must set the SLURM_TESTSUITE_CONF environment
+  variable to the full path of your testsuite.conf file.
+  Review and edit testsuite.conf as necessary.
+* pytest (pytest-3) must be installed in order to run the python testsuite.
+* expect must be installed in order to run the expect testsuite.
+* Set the SLURM_CLUSTER environment variable to set up a custom directory
+  in the 'results' dir that will hold unique logs and test data.
+  You can name this whatever you'd like, it will be created if needed.
+  This is a useful way to archive results from run-tests with things like
+  different dates, commits, or configs.
+* Execute run-tests with the desired options to run the testsuites.
+
+testsuite.conf:
+
+The testsuite.conf configuration file contains parameters in the form:
+"Parameter = Value" similar to parameter format in slurm.conf.
+Supported parameters include:
+
+SlurmSourceDir:  Slurm Source Directory (contains configure.ac and the src directory)
+SlurmBuildDir:   Slurm Build Directory (where you ran configure and make from)
+SlurmInstallDir: Slurm Installation Directory (value of --prefix configure option)
+SlurmConfigDir:  Slurm Configuration Directory (compiled-in location of slurm.conf)
+
+If you are running in local-config, if the user running the test is SlurmUser or
+AdminLevel, you better specify an unprivileged user to run the test commands as:
+
+SlurmTestUser: Linux user without AdminLevel in the local-config Slurm.
+
+Tips:
+
+* the include and exclude filters use (perl 5) regular expressions
+* e.g. to run expect test1.1 use: run-tests -i expect/test1.1$
+* to run just the unit tests, use: run-tests -i unit
+* to run just the expect tests, use: run-tests -i expect
+* to run just the python tests, use: run-tests -i python
+
+A summary of each expect test is shown below.
+############################################################################
+
+
+test1.#    Testing of srun options.
+===================================
+test1.2    Confirm that a job executes with the proper task count (--nprocs
+	   and --overcommit options).
+test1.8    Confirm that basic srun stdin, stdout, and stderr options work
+	   (--input, --output, and --error option respectively).
+test1.9    Test of srun verbose mode (--verbose option).
+test1.12   Test srun --overlap
+test1.14   Test exclusive GRES/GPU allocation for a job (--exclusive option).
+test1.17   Test of srun --open-mode (truncate or append) option.
+test1.18   Test of --licenses option
+test1.32   Test of srun signal forwarding
+test1.33   Test of srun application exit code reporting
+test1.43   Test of slurm_job_will_run API, (srun --test-only option).
+test1.44   Read srun's stdout slowly and test for lost data.
+test1.48   Test of srun mail options (--mail-type and --mail-user options).
+test1.53   Test of --signal option.
+test1.55   Verify srun behaves when its controlling terminal disappears.
+test1.56   Test buffered standard IO with really long lines
+test1.58   Test of srun --jobid for an existing job allocation
+test1.59   Test of hostfile logic for job steps
+test1.60   Test of labelling output when writing a file per task or per node
+test1.61   Test of srun job step time limit
+test1.62   Test of gres/gpu plugin (if configured).
+test1.63   Test of srun --disable-status/-X option, SIGINT to be sent to tasks.
+test1.64   Test interruption of srun while waiting for resource allocation.
+test1.65   Test of srun --mpi=list option.
+test1.66   Validates srun steps run on the correct node within a allocation.
+test1.67   Test srun program movement between background and foreground.
+test1.68   Test srun program movement between foreground and background.
+test1.69   Test multiple background srun programs execute simultaneously.
+test1.70   Validates that srun standard input and output work with binary files.
+test1.71   Validates that srun exit code matches that of a test program.
+test1.72   Validate JobAcctGatherFrequency configuration parameter is enforced.
+test1.73   Validate OverTimeLimit configuration parameter is enforced.
+test1.74   Validate MaxNode and GrpNode limit enforcement with QoS & association.
+test1.75   Test that --cpu-freq is enforced when using non-numeric values
+test1.76   Test that --cpu-freq sets min-max:gov
+test1.77   Test that job name specified at the command line overwrites
+           the environment variable SLURM_JOB_NAME
+test1.80   Confirm that a job executes with the proper task distribution
+	   (--nodes and --distribution options).
+test1.81   Confirm that a job executes with the proper node count
+	   (--nodes option).
+test1.82   Confirm that a job executes with the specified nodes
+	   (--nodelist and --exclude options).
+test1.83   Test of contiguous option with multiple nodes (--contiguous option).
+	   Also see test1.14.
+test1.84   Test of cpus-per-task option on a single node (--cpus-per-task
+	   option).
+test1.85   Test of node selection from within a job step on existing allocation
+test1.86   Confirm node selection from within a job step on existing allocation
+	   (--nodelist, --exclude, --nodes and --nprocs options).
+test1.87   Confirm node selection from within a job step on existing allocation
+	   (--relative, --nodes and --nprocs options).
+test1.91   Test of CPU affinity for multi-core systems.
+test1.92   Test of task distribution support on multi-core systems.
+test1.93   Test of default CPU binding support.
+test1.94   Test of PMI2 task spawn logic
+test1.95   Basic UPC (Unified Parallel C) test via srun.
+test1.96   Basic SHMEM test via srun.
+test1.97   Test that --ntask-per-node and -c options are enforced
+test1.100  Test of pack/nopack task distribution.
+test1.101  Test of --bcast option.
+test1.102  Test of --deadline option too late
+test1.103  Test of --deadline option too short
+test1.104  Test of --deadline option and time limit partition
+test1.105  Test of --deadline option and no time
+test1.106  Test of --deadline option and --time_min too long
+test1.107  Test of --deadline option and --time_min and time too long
+test1.108  Test of --deadline option and --begin option too late
+test1.109  Test of --deadline and --begin option and --time_min too long
+test1.110  Test of --deadline and --begin option and --time_min OK
+test1.111  Test of --deadline and --begin option and time to be changed
+test1.112  Test of --deadline and --begin option and time not changed
+test1.113  Test of --use-min-nodes option.
+test1.114  Test of srun --spread-job option.
+test1.115  Test of srun not hanging on ignored stdin.
+test1.116  Extended MPI functionality tests via srun.
+test1.117  Test of standalone srun not ignoring --mem-per-cpu
+test1.118  Test --hint mutual exclusion properties.
+test1.119  Test of srun --ntasks-per-gpu option.
+test1.120  Test of --distribution options
+
+test2.#    Testing of scontrol options (to be run as unprivileged user).
+========================================================================
+test2.1    Validate scontrol version command.
+test2.2    Validate scontrol help command.
+test2.3    Validate scontrol ping command.
+test2.4    Validate scontrol exit, quit, and !! commands.
+test2.5    Validate scontrol show commands for configuration, daemons,
+	   nodes and partitions.
+test2.6    Validate scontrol verbose and quiet options.
+test2.7    Validate scontrol pidinfo command.
+test2.8    Validate scontrol show commands for jobs and steps.
+test2.10   Validate scontrol oneliner mode (--oneliner option).
+test2.13   Validate scontrol update command for job steps.
+test2.14   Validate scontrol update size of running job.
+test2.15   Validate scontrol update size of running job with some running tasks.
+test2.16   Validate scontrol displays and updates Allow/Deny accounts.
+test2.17   Validate scontrol displays and updates Allow/Deny Qos.
+test2.18   Validate that Allow/Deny accounts are enforced.
+test2.19   Validate that Allow/Deny Qos are enforced.
+test2.20   Validate scontrol show hostnames.
+test2.21   Validate scontrol requeue of failed or completed job.
+test2.22   Validate scontrol requeuehold requeues job to held pending state.
+test2.23   Validate scontrol requeuehold State=SpecialExit.
+test2.24   Validate the scontrol write config creates accurate config
+test2.25   Validate scontrol show assoc_mgr command.
+test2.26   Validate scontrol top command to priority order jobs.
+test2.27   Validate scontrol update mail user and mail type.
+
+
+test3.#    Testing of scontrol options (best run as SlurmUser or root).
+=======================================================================
+test3.1    Validate scontrol reconfigure command.
+test3.2    Validate scontrol update command for partitions.
+test3.3    Validate scontrol update command for nodes.
+test3.4    Validate scontrol update command for jobs by JobID.
+test3.5    Validate scontrol create, delete, and update of partition.
+test3.6    Testing of hidden partitions.
+test3.8    Test of batch job requeue.
+test3.9    Test of "scontrol show slurmd"
+test3.10   Test of "scontrol notify <jobid> <message>"
+test3.11   Validate scontrol create, delete, and update of reservations.
+test3.13   Validate scontrol update command for jobs by JobName and UserID.
+test3.14   Test of advanced reservation "replace" option.
+test3.15   Test of advanced reservation of licenses.
+test3.16   Test that licenses are sorted.
+test3.17   Test of node feature changes with reconfiguration.
+test3.18   Validate scontrol change gres count with File is disabled.
+UNTESTED   "scontrol abort"    would stop slurm
+UNTESTED   "scontrol shutdown" would stop slurm
+
+
+test4.#    Testing of sinfo options.
+====================================
+test4.3    Test partition information, both long and short (--long and
+	   --summarize options) and partition filtering (--partition option).
+test4.4    Test node information, both regular and long (--Node, --long,
+	   and --exact options).
+test4.6    Test sinfo iteration (--iterate option).
+test4.7    Confirm that sinfo verbose option works (--verbose option).
+test4.8    Check sinfo output without header (--noheader option).
+test4.9    Check sinfo formatting options (--format option and SINFO_FORMAT
+	   environment variable).
+test4.10   Confirm that sinfo reports a proper version number (--version
+	   option).
+test4.11   Test down node reason display (--list-reasons option).
+test4.12   Test cpu total and allocation numbers.
+test4.13   Test sinfo's -O (--Format) option.
+test4.14   Test that multiple partitions can be specified in the env variable.
+
+
+test5.#    Testing of squeue options.
+=====================================
+test5.3    Test squeue iteration (--iterate option).
+test5.4    Test squeue formatting options (--noheader, --format and --step
+	   options and SQUEUE_FORMAT environment variable).
+test5.5    Test squeue sorting (--sort option).
+test5.6    Test squeue filtering (--jobs, --nodelist, --states, --steps and
+	   --user options).
+test5.7    Confirm that squeue verbose option works (--verbose option).
+test5.8    Confirm that squeue reports a proper version number (--version
+	   option).
+test5.9    Validate that squeue -O displays correct job/step format.
+test5.10   Validate that squeue --priority is listing jobs by priority.
+test5.11   Validate that job node estimation is accurate.
+
+test6.#    Testing of scancel options.
+======================================
+test6.3    Validate scancel interactive mode (--interactive option).
+test6.5    Validate scancel verbose option (--verbose option).
+test6.6    Confirm that scancel reports a proper version number (-V option).
+test6.7    Validate scancel signal option (--signal and --verbose options).
+test6.8    Validate scancel state and name filters (--state and --name options).
+test6.9    Validate scancel of individual job steps (job.step specification).
+test6.10   Validate scancel user and partition filters, delete all remaining
+	   jobs (--partition and --user options).
+test6.11   Validate scancel quiet option, no warning if job gone
+	   (--quiet option).
+test6.13   Test routing all signals through slurmctld rather than slurmd
+	   (undocumented --ctld option).
+test6.14   Test scancel nodelist option (--nodelist or -w).
+test6.15   Test scancel signal of full job including batch script (--full option).
+test6.16   Validate scancel of multiple job steps (job.step specification).
+test6.17   Test scancel handling of invalid job IDs and filters.
+
+
+test7.#    Testing of other functionality.
+==========================================
+test7.2    Test of PMI functions available via API library. Tests
+	   --pmi-threads option in srun command.
+test7.4    Test of TotalView operation with srun, with and without bulk
+	   transfer.
+test7.5    Test of TotalView termination logic for srun.
+test7.6    Test of TotalView operation with sattach
+test7.7    Test of resource allocation layout.
+test7.9    Test that no files are open in spawned tasks (except stdin,
+	   stdout, and stderr) to ensure successful checkpoint/restart.
+test7.10   Test if we can trick Slurm into using the wrong user ID
+	   through an LD_PRELOAD option.
+test7.11   Test of SPANK plugin.
+test7.12   Test of slurm_job_step_stat() and slurm_load_job() API calls.
+test7.14   Verify the ability to modify the Derived Exit Code/String fields
+	   of a job record in the database
+test7.15   Verify signal mask of tasks have no ignored signals.
+test7.16   Verify that auth/munge credential is properly validated.
+test7.17   Test GRES APIs.
+test7.19   Test sbatch/srun/salloc path resolving
+test7.20   Test lua JobSubmitPlugin
+test7.22   Test basic functionality of backfill scheduler
+test7.23   Test min_mem_per_{cpu,node} in lua JobSubmitPlugin
+
+test8.#    Testing of advanced reservation functionality.
+=========================================================
+test8.12   Test reservation with flags=FLEX
+test8.13   Test user_resv_delete parameter
+
+test9.#    System stress testing. Exercises all commands and daemons.
+=====================================================================
+test9.1    Stress test of stdin broadcast.
+test9.2    Stress test of stdout with stdin closed.
+test9.3    Stress test of per-task output files with stdin closed.
+test9.4    Stress test of per-task output and input files.
+test9.5    Stress test of per-task input files.
+test9.6    Stress test of per-task output files.
+test9.8    Stress test with maximum slurmctld message concurrency.
+test9.9    Throughput test for 5000 jobs for timing
+
+test12.#   Testing of sacct command and options
+===============================================
+test12.2   Test validity/accuracy of accounting data for exit code,
+	   memory and real-time information along with stating a running job.
+test12.3   Test sacct filtering of records by account and job name.
+test12.4   Test sacct --b, g, j, l, n, p, u, v options.
+test12.7   Validate that -D shows the correct state when jobs are requeued.
+test12.8   Validate that a job step reports TIMEOUT inside accounting.
+test12.9   Test of sacct functionality for array jobs.
+test12.10  Test of sacct with -s R, -S and -E options
+
+test13.#   Testing of switch plugins
+====================================
+
+test14.#   Testing of sbcast options.
+=====================================
+test14.2   Confirm sbcast help option works (--help option).
+test14.3   Confirm that sbcast reports a proper version number
+	   (--version option).
+test14.4   Test sbcast file overwrite (--force option).
+test14.5   Test sbcast time preservation (--preserve option).
+test14.6   Test sbcast logging (--verbose option).
+test14.7   Test sbcast security issues.
+test14.8   Test sbcast transmission buffer options (--size and
+	   --fanout options).
+test14.9   Verify that an sbcast credential is properly validated.
+test14.10  Validate sbcast for a job step allocation (subset of job allocation).
+
+test15.#   Testing of salloc options.
+=====================================
+test15.2   Confirm salloc help option works (--help option).
+test15.3   Confirm that salloc reports a proper version number
+	   (--version option).
+test15.4   Confirm that a job executes with appropriate user id and group id.
+test15.5   Confirm that job time limit function works (--time and
+	   --kill-command options).
+test15.6   Test of salloc verbose mode (--verbose option).
+test15.7   Test of processors, memory, and temporary disk space
+	   constraints options (--mincpus, --mem, and --tmp options).
+	   Also test that priority zero job is not started (--hold option).
+test15.8   Test of immediate allocation option (--immediate option).
+test15.9   Confirm that salloc exit code processing.
+test15.10  Confirm that a job allocates the proper processor count (--ntasks)
+test15.11  Test of --nice and --job-name options.
+test15.12  Verify node configuration specification (--constraint option).
+test15.13  Verify the appropriate job environment variables are set
+test15.14  Test of job dependencies (--dependency option).
+test15.15  Test of user signal upon allocation (--bell and --no-bell options)
+test15.16  Verify that Slurm directed environment variables are processed:
+	   SALLOC_BELL and SALLOC_NO_BELL (can't really confirm from Expect)
+test15.18  Test of running non-existent job, confirm timely termination.
+test15.19  Confirm that a job executes with the proper node count
+	   (--nodes option).
+test15.20  Confirm that a job executes with the specified nodes
+	   (--nodelist and --exclude options).
+test15.21  Test of contiguous option with multiple nodes (--contiguous option).
+test15.22  Test of partition specification on job submission (--partition
+	   option).
+test15.23  Test of environment variables that control salloc actions:
+	   SALLOC_DEBUG and SALLOC_TIMELIMIT
+test15.24  Test of --overcommit option.
+test15.25  Test of job account(--account option).
+test15.26  Test interruption of salloc while waiting for resource allocation.
+test15.27  Test salloc --exclusive allocates all cpus on node.
+test15.30  Test of --deadline option too late
+test15.31  Test of --deadline option too short
+test15.32  Test of --deadline option and time limit partition
+test15.33  Test of --deadline option and no time
+test15.34  Test of --deadline option and time_min too long
+test15.35  Test of --deadline option and time_min and time too long
+test15.36  Test of --deadline option and --begin option too late
+test15.37  Test of --deadline and --begin option and --time_min too long
+test15.38  Test of --deadline and --begin option and --time_min OK
+test15.39  Test of --use-min-nodes option.
+
+test16.#   Testing of sattach options.
+======================================
+test16.2   Confirm sattach help option works (--help option).
+test16.3   Confirm that sattach reports a proper version number
+	   (--version option).
+test16.4   Basic sattach functionality test (--layout, --verbose, --label
+	   and --output-filter options).
+
+
+test17.#   Testing of sbatch options.
+=====================================
+test17.2   Confirm sbatch help option works (--help option).
+test17.3   Confirm that sbatch reports a proper version number
+	   (--version option).
+test17.4   Confirm that as sbatch job executes as the appropriate user and
+	   group.
+test17.6   Confirm that a job executes with the proper task count (--ntasks
+	   option).
+test17.8   Confirm that sbatch sets appropriate time limit (--time
+	   option)
+test17.9   Confirm that sbatch sets appropriate job name (--job-name option)
+test17.10  Test of processors, memory, and temporary disk space
+	   constraints options (--mincpus, --mem, and --tmp options).
+	   Also test that priority zero job is not started (--hold
+	   option).
+test17.12  Verify node configuration specification (--constraint option)
+test17.13  Verify the appropriate job environment variables are set
+test17.14  Verify that user environment variables are propagated to the job
+test17.17  Confirm that oversubscribe flags are respected  (--nodelist and
+	   --oversubscribe options)
+test17.18  Test of job dependencies and deferred begin time (--dependency
+	   and --begin options).
+test17.19  Test of job submit to multiple partitions (--partition).
+test17.22  Test of running non-existent job, confirm timely termination.
+test17.23  Test of nice value specification (--nice option).
+test17.24  Test of --partition and --verbose options.
+test17.25  Verify environment variables controlling sbatch are processed:
+	   SBATCH_ACCOUNT, SBATCH_DEBUG and SBATCH_TIMELIMIT
+test17.26  Test of --input option.
+test17.27  Test that a job executes with the specified nodes, requires multiple
+	   nodes (--nodes, --nodelist and --exclude options).
+test17.28  Tests #SBATCH entry functionality in a batch script.
+test17.29  Verify that command arguments get forwarded to job script.
+test17.31  Tests #PBS entry functionality in a batch script.
+test17.32  Test of --overcommit option.
+test17.33  Test of --open-mode option.
+test17.34  Test of --core-spec option.
+test17.36  Test that the OverSubscribe option in partitions is enforced.
+test17.37  Validate that afternotok dependency is enforced.
+test17.38  Test for sbatch --signal.
+test17.39  Validate dependency OR option.
+test17.40  Test of --thread-spec option.
+test17.41  Validate that sbatch, srun, salloc return partition error message.
+test17.43  Test sbatch handling of very long lines in script
+test17.44  Validate that aftercorr dependency is enforced.
+test17.45  Test of sbatch --bbf option
+test17.51  Validate that the mcs plugin (mcs/user) is OK with sbatch
+test17.52  Validate that the mcs plugin (mcs/group) is OK with sbatch
+test17.53  Test of --deadline option too late
+test17.54  Test of --deadline option too short
+test17.55  Test of --deadline option and time limit partition
+test17.56  Test of --deadline option and no time
+test17.57  Test of --deadline option and time_min too long
+test17.58  Test of --deadline option and time_min and time too long
+test17.59  Test of --deadline option and --begin option too late
+test17.60  Test of --deadline and --begin option and --time_min too long
+test17.61  Test of --deadline and --begin option and --time_min OK
+test17.62  Test for #BSUB batch script entry
+test17.63  Test of --use-min-nodes option.
+test17.64  Validate that the mcs plugin (mcs/account) is OK with sbatch
+
+
+test19.#   Testing of strigger options.
+=======================================
+test19.2   strigger --usage
+test19.3   strigger --set (node options)
+test19.4   strigger --set --reconfig
+test19.5   strigger --set (job options)
+test19.6   strigger --clear and --get (with filtering)
+test19.7   strigger --set --idle
+test19.8   strigger --noheader
+test19.9   Validate that duplicate triggers cannot be submitted
+
+
+test20.#   Testing of PBS commands and Perl APIs.
+=================================================
+test20.2   qstat command tests
+test20.3   qdel command tests
+test20.4   pbsnodes command tests
+test20.5   Test the qalter --help option
+test20.6   Test the qalter -r option of altering a job's rerunnable flag
+test20.7   Test qalter's -o option for changing the stdout path of a job
+test20.8   Test the qalter -N option for changing the name of a job.
+test20.9   Test for the qalter --man option
+test20.10  Test for the qrerun --help option
+test20.11  Test for the qrerun --man option
+test20.12  Test for qsub -V/-v arguments and their interaction with sbatch scripts
+test20.13  Test to test Grid Engine specific options
+test20.14  Test PBS/qsub -l gpu options
+test20.15  Test for seff
+
+test21.#   Testing of sacctmgr commands and options.
+====================================================
+test21.2   sacctmgr --help
+test21.3   sacctmgr -V
+test21.4   sacctmgr version
+test21.5   sacctmgr add a cluster
+test21.6   sacctmgr add multiple clusters
+test21.7   sacctmgr list clusters
+test21.8   sacctmgr modify a cluster
+test21.9   sacctmgr modify multiple clusters
+test21.10  sacctmgr add an account
+test21.11  sacctmgr add multiple accounts
+test21.12  sacctmgr list multiple accounts
+test21.13  sacctmgr modify account
+test21.14  sacctmgr modify multiple accounts
+test21.15  sacctmgr add an user
+test21.16  sacctmgr add and list multiple users
+test21.17  sacctmgr modify user
+test21.18  sacctmgr modify multiple users
+test21.19  sacctmgr add and delete coordinator
+test21.20  sacctmgr add and modify QoS
+test21.21  sacctmgr add an account to cluster; use with salloc, sbatch and srun
+test21.23  sacctmgr wckey
+test21.24  sacctmgr dump file
+test21.25  sacctmgr show config
+test21.26  sacctmgr +=, -= modify QoS test
+test21.27  sacctmgr problems test
+test21.28  sacctmgr abort delete
+test21.29  sacctmgr clear (modify) QoS values
+test21.30  sacctmgr test if the QoS values are enforced
+test21.31  sacctmgr modify Resource values
+test21.32  Validate that modify QoS =,+=,-= change the preempt value
+test21.33  Validate that a resource can be added to a cluster after creation
+test21.34  Validate that partition and job QoS limits are enforced
+test21.35  Validate DenyOnLimit QoS flag is enforced on QoS and Associations.
+test21.36  Validate that sacctmgr lost jobs fixes lost jobs.
+test21.37  sacctmgr show and clear stats
+test21.38  sacctmgr modify limits for nested accounts with multiple users
+test21.40  Test association plus partition/job QoS unique node limits enforced
+test21.41  sacctmgr update job set newwckey=
+test21.42  Test if headers returned by sacctmgr show can be used as format= specifiers
+test21.44  Test sacctmgr show assoc where qos=
+
+test22.#   Testing of sreport commands and options.
+	   These also test the sacctmgr archive dump/load functions.
+==================================================
+test22.1   sreport cluster utilization report
+test22.2   sreport h, n, p, P, t, V options
+
+
+test23.#   Testing of sstat commands and options.
+=================================================
+test23.1   sstat -e, h, usage and V options
+test23.2   sstat -a, n, o, p, P, v options
+
+
+test24.#   Testing of sshare/priority multifactor plugin.
+=========================================================
+test24.2   sshare h, n, p, P, v, and V options.
+test24.4   Test of Fair Tree multifactor
+test24.5   Test SiteFactor
+test24.6   Test non-normalized factors
+test24.7   Test normalized factors
+
+test25.#   Testing of sprio command and options.
+================================================
+test25.1   sprio all options
+
+
+test27.#   Testing of sdiag commands and options.
+=================================================
+test27.2   sdiag --help
+test27.3   sdiag --version
+test27.4   sdiag --all (default output)
+test27.5   sdiag --reset
+
+
+test28.#   Testing of job array options.
+========================================
+test28.2   checks that the --array environment variables are correct, and
+	   checks that the --output and -error files were created and
+	   contain the correct information.
+test28.3   Validates that the scontrol show job contains the job array fields
+test28.4   Validates scontrol update command for a job array with
+	   a job array index and the whole job array.
+test28.5   Validates that scontrol can hold and release a whole job
+	   array or an individual jobid index.
+test28.6   Validates that when a job array is submitted to multiple
+	   partitions that the jobs run on them.
+test28.7   Confirms job array dependencies.
+test28.9   Test of maximum running task count in a job array.
+test28.10  Test change to maximum running task count in a job array.
+test28.11  Test that job arrays requesting features with --constraint are
+	   purged from the slurmctld correctly after MinJobAge seconds.
+test28.12  Verify head job isn't purged before other jobs in the array.
+test28.13  Test requeue of only failed tasks in the job array.
+
+test31.#   Test of Slurm Epilog and Prolog.
+===========================================
+test31.2   Validate that job is set to requeue held state at prolog failure.
+test31.3   Validate Prolog and Epilog Environment Variables.
+
+
+test32.#   Test of sgather command and options.
+===============================================
+test32.2   Validates that the sgather --help option reports the help message.
+test32.3   Validates that the sgather -V (Version) option reports the version.
+test32.4   Validates that sgather copies specified files from compute nodes.
+test32.5   Validates that sgather -k keeps the original source file.
+test32.6   Validates that sgather -C compress the copied file.
+test32.7   Validates that sgather -f ignores nonexistent source files.
+test32.8   Validates that sgather -F changes the fanout message.
+test32.9   Validates that sgather -p option preserves file state.
+test32.10  Validates that sgather -r copies files recursively.
+test32.11  Validates that sgather -v prints the output logging of the job.
+test32.12  Validates that sgather -t changes the timeout message.
+
+test34.*   Test of Slurm preemption.
+====================================
+test34.2   Validate that qos PreemptMode is enforced.
+
+test35.*   Burst buffer tests
+=============================
+test35.1   Cray persistent burst buffer creation
+test35.2   Cray job-specific burst buffer use
+test35.3   Cray burst buffer use by job arrays
+test35.4   Zero size job with burst buffer creation testing
+test35.5   Cray dwstat command testing
+test35.6   Test of --depend=afterburstbuffer option
+
+test36.#   Testing of openlava/LSF wrappers and Perl APIs.
+==========================================================
+test36.2   bjobs wrapper test
+test36.3   bkill wrapper test
+test36.4   bsub wrapper test
+
+test37.#   Testing of federations.
+==================================
+test37.2   Validate federated clusters return federated job ids.
+test37.3   scontrol show federations
+test37.4   federated job submission
+test37.5   Federated Requeue
+test37.6   Federated Job Updates
+test37.7   Federated Cluster States
+test37.8   scontrol --local, --sibling options
+           scancel --sibling=<jobid>
+test37.9   Verify federated scontrol, squeue, sinfo and sprio output
+test37.10  Federated job cancellations
+test37.11  Federated sacct output
+test37.12  Federated sbatch|srun --test-only
+test37.13  Validate federated arrays
+test37.14  Validate federated scontrol notify
+test37.15  Validate federated scontrol suspend
+test37.16  Validate job cleanup when clusters are removed federation
+test37.17  Test local and remote job dependencies
+
+test38.#   Testing of heterogeneous jobs.
+=========================================
+test38.3   Validate salloc heterogeneous job options.
+test38.4   Validate salloc heterogeneous job environment variables.
+test38.5   Validate squeue heterogeneous job fields
+test38.6   Test of SPANK plugin with heterogeneous jobs
+test38.7   Test of MPI with heterogeneous jobs.
+test38.8   Test of sacct functionality for heterogeneous jobs.
+test38.9   Validate srun --het-group option.
+test38.10  Test of scontrol update job for heterogeneous jobs.
+test38.11  Validate sbcast for a hetjob allocation.
+test38.12  Test label option with hetjob allocation.
+test38.14  Test hetjob step output file labeling and different commands/args
+test38.15  Test for proper handling of different rank end times
+test38.16  Test environment variables needed by MPI
+test38.17  Test for multiple, out of order srun --het-group options
+test38.18  Validate heterogeneous gpu job options.
+test38.19  Test heterogeneous job steps.
+
+test39.#   Test of job select/cons_tres and --gpu options.
+==========================================================
+test39.1   Test full set of sbatch --gpu options and scontrol show job
+test39.2   Test full set of salloc --gpu options and scontrol show job
+test39.3   Test full set of srun --gpu options and scontrol show step
+test39.4   Test some invalid combinations of --gpu options
+test39.5   Test some combinations of srun and sbatch --gpu options
+test39.6   Ensure job requesting GPUs on multiple sockets gets CPUs on them
+test39.7   Test --cpus-per-gpu option
+test39.8   Test --gpu-bind options
+test39.9   Test --gpu-freq options
+test39.11  Test GRES options with craynetwork (no topology)
+test39.12  Test some valid combinations of srun --gpu and non-GPU GRES options
+test39.13  Validate proper GRES operation under heavy load (many jobs)
+test39.15  Test --gpus-per-tres with --overcommit option
+test39.16  Test --gpus-per-tres with --exclusive option
+test39.20  Test GPU resource limits with various allocation options
+test39.22  Test heterogeneous job GPU allocations.
+test39.23  Test --gpus-per-task with implicit task count
+
+test40.#   Test of job select/cons_tres and gres/mps options.
+=============================================================
+test40.3   Test accounting for MPS resources with various allocation options
+test40.4   Test MPS resource limits with various allocation options
+test40.6   Decrease size of job with allocated MPS
+test40.8   Simple CUDA MPS test
+
+
+A summary of each python test is shown below.
+############################################################################
+
+
+test_100_#   Special tests.
+===========================
+test_100_1   Run all libcheck tests
+test_100_2   Test live upgrades
+test_100_3   Performance test: slurmdbd purge large tables
+test_100_4   Meta-test: testing test environment (coredump generation)
+test_100_5   Performance test: slurmdbd usage rollup triggered via sacctmgr
+             rollup with realistic workload. Rolls up every cluster in the
+             accounting DB; use a throwaway DB.
+test_100_10  Test step dependency rejection in an allocation with an older stepmgr
+
+test_101_#   Testing of sacct options.
+======================================
+test_101_1   Test --help and --helpformat
+test_101_2   Test sacct SLUID support including resizes and OriginalSLUID
+test_101_3   Test sacct OverSubscribe and Exclusive reporting from slurmdbd
+test_101_4   Test basic sacct --json
+test_101_5   Test sacct Restarts and Start are per-run after a requeue
+test_101_6   Test sacct job name filtering options
+test_101_7   Test sacct Reservation resolution against reservation records
+test_101_8   Test sacct Timelimit and TimelimitRaw report a step's own limit
+test_101_9   Test sacct BillingRaw and --json billing_raw against sshare RawUsage
+test_101_10  Test job updates during a requeue keep the previous sacct record
+test_101_11  Test sacct --state=SUSPENDED selection against the suspend history
+test_101_12  Performance test: sacct --state=SUSPENDED must not scan the job
+             table
+test_101_13  Test a job's suspend records are closed when the job ends
+test_101_14  Test the job exit status and Slurm return code stay separate
+test_101_15  Test a SIGHUP-killed job is recorded as signaled
+test_101_16  Test sacct --kv and sacctmgr modify job KV
+test_101_17  Test job KV is not stored without AccountingStoreFlags=job_kv
+test_101_18  Test sacct names the user that cancelled a job or step
+test_101_19  Test sacct --expand-patterns for StdIn, StdOut and StdErr
+
+test_102_#   Testing of sacctmgr options.
+=========================================
+test_102_1   /commands/sacctmgr/test_federation.py
+test_102_2   /commands/sacctmgr/test_--usage.py
+test_102_3   /commands/sacctmgr/test_--json.py
+test_102_4   /commands/sacctmgr/test_ping.py
+test_102_5   sacctmgr create qos/account job and then delete account/qos
+test_102_6   Test sacctmgr remove account
+test_102_7   Test sacctmgr modify job tres
+test_102_8   Test sacctmgr remove multiple qos
+test_102_9   Performance test: sacctmgr delete user with large assoc table
+test_102_10  Test sacctmgr modify TRES with +=/-= syntax
+test_102_11  Test sacctmgr archive dump uses configured Purge*After when no duration is given
+test_102_12  Test sacctmgr load, confirm that typed GRES can get parsed correctly
+test_102_13  Test sacctmgr show assoc withsubaccounts matches the account
+             lineage and not a partition named like the account
+test_102_17  Test sacctmgr TresDecayHalfLife set, show, inherit and dump/load
+test_102_18  Test sacctmgr load and dump baseline functionality
+test_102_19  Test sacctmgr declarative load
+test_102_20  Test sacctmgr load clean=account and clean=qos (isolated)
+test_102_21  Test limits inherited from a parent account follow an account move
+test_102_22  Test wckey removal logic
+test_102_25  Test sacctmgr modify qos preempt+= of a QOS already in the list
+test_102_26  Test sacctmgr add of an account, user or partition name sharing
+             its first 42 characters with an existing one: stored
+             associations, a running slurmdbd's association list, and a
+             slurmdbd restart
+test_102_27  Test sacctmgr show reservation WithKV reports the KV
+test_102_28  Test reservation KV is not stored without AccountingStoreFlags=resv_kv
+test_102_29  Test sacctmgr show event names the user that set a node's reason
+test_102_30  Test sacctmgr archive dump and load of each record type
+test_102_31  Test sacctmgr archive dump and load of usage records
+
+test_103_#   Testing of salloc options.
+=======================================
+test_103_1   /commands/salloc/test_--usage.py
+test_103_2   Test salloc with default command
+
+test_104_#   Testing of sattach options.
+========================================
+test_104_1   /commands/sattach/test_--usage.py
+test_104_2   Test sattach gets job output, by JobID and by SLUID.
+
+test_105_#   Testing of sbatch options.
+=======================================
+test_105_1   /commands/sbatch/test_gpu_options.py
+test_105_3   /commands/sbatch/test_invalid_mps_options.py
+test_105_4   /commands/sbatch/test_--usage.py
+test_105_5   Test sbatch --output and --error options work, including use of spaces, %j, and %u
+test_105_6   Test #SBATCH directives in sbatch scripts
+test_105_7   Test accounting for GPU resources with various allocation options
+test_105_8   Test of job account (--account option).
+test_105_9   Test sbatch --requeue=expedite option (success, failure, epilog failure cases)
+test_105_10  Test --oom-kill-step option
+test_105_11  Test sbatch --parsable output format
+test_105_12  Test JobAcctGatherParams=OverMemoryKill enforcement
+test_105_15  Test sbatch --wait (-W) blocking and exit code propagation for normal and array jobs
+test_105_16  Test --layout validation, display, update, scripts, and accounting
+test_105_17  Test WCKey specification on job submit (sbatch --wckey)
+test_105_18  Test sbatch --dependency after+time delays and special-exit
+             afternotok
+test_105_19  Test nodes held by an expedited requeue stay unavailable until the
+             requeue, and drain or go down safely
+test_105_20  Test sbatch, salloc and srun --kv
+test_105_21  Test a job adds nodes beyond a node list shorter than it needs
+test_105_22  Test sbatch --external option handling across hetjob shapes
+
+test_106_#   Testing of sbcast options.
+=======================================
+test_106_1   /commands/sbcast/test_--usage.py
+test_106_2   Test sbcast transfers files into the job namespace, not the node
+test_106_3   Test sbcast with compression
+test_106_4   Test sbcast copies a file to a job with JobID and SLUID
+test_106_5   Test sbcast to a hetjob with namespace/tmpfs
+
+test_107_#   Testing of scancel options.
+========================================
+test_107_1   /commands/scancel/test_--help.py
+test_107_2   /commands/scancel/test_--usage.py
+test_107_3   Test scancel --ctld and filtering options
+test_107_4   Test scancel signals jobs by mixes of Job IDs and SLUIDs
+test_107_5   Test scancel of a hetjob step keeps the component jobs running
+test_107_6   Test scancel job name filtering options
+test_107_7   Test scancel array task id validation
+test_107_8   Test scancel --full signals the steps on every node
+
+test_108_#   Testing of scontrol options.
+=========================================
+test_108_1   /commands/scontrol/test_update_partition.py
+test_108_2   /commands/scontrol/test_--version.py
+test_108_3   /commands/scontrol/test_--help.py
+test_108_4   /commands/scontrol/test_reconfigure.py
+test_108_5   /commands/scontrol/test_--json.py
+test_108_6   Test scontrol show topology option
+test_108_7   Test of job suspend/resume
+test_108_8   Test of InstanceId/InstanceType
+test_108_9   Test scontrol listpids with Job IDs and SLUIDs
+test_108_10  Submit and modify jobs using a mix of Job IDs and SLUIDs
+test_108_11  Test scontrol update NodeName=ALL with AvailableFeatures
+test_108_12  Test nodes join feature-based NodeSet partitions on update
+test_108_13  Test the ExitCode=<exit>:<signal> rendering shared by scontrol,
+             squeue and sacct
+test_108_14  Test node event records across node updates, long reasons,
+             and same-second state changes
+test_108_15  Test scontrol completing output, including the SLUID on requeue
+test_108_16  Test scontrol array task id validation
+test_108_17  Test updating a job's memory with partition memory defaults
+test_108_18  Test scontrol requeue and requeuehold of external jobs
+test_108_19  Test job updates with node lists naming a node that no longer
+             exists
+test_108_20  Test that a job update's new ReqNodeList must fit its new partition
+test_108_21  Test scontrol authorization for job, step, partition and
+             reservation commands
+test_108_22  Test scontrol authorization for node commands
+test_108_23  Test scontrol reports SlurmRC only with --details
+test_108_24  Test per-partition priority array is cleared when a job is held
+test_108_25  Test multi-QOS job priority ordering and display
+test_108_26  Test scontrol update rejects malformed input for every update tag
+test_108_27  Test scontrol release/update of jobs in an empty partition
+test_108_28  Test scontrol tasknode task to node mapping
+test_108_29  Test the node list of a pending job across rejected and accepted
+             updates, with and without a slurmctld restart
+test_108_31  Test scontrol write config keeps InteractiveStepOptions,
+             ResumeFailProgram and SlurmctldHost whole
+
+test_109_#   Testing of sdiag options.
+======================================
+test_109_1   /commands/sdiag/test_--usage.py
+test_109_2   /commands/sdiag/test_--json.py
+
+test_110_#   Testing of sgather options.
+========================================
+test_110_1   /commands/sgather/test_--usage.py
+
+test_111_#   Testing of sinfo options.
+======================================
+test_111_1   /commands/sinfo/test_--help.py
+test_111_2   /commands/sinfo/test_--usage.py
+test_111_3   /commands/sinfo/test_--json.py
+test_111_4   Test --state and --nodes filtering
+test_111_5   /commands/sinfo/test_--state.py
+test_111_6   Verify --states name parsing, --helpstate round-trip, and
+             invalid-state rejection
+test_111_7   Test node row grouping
+
+test_112_#   Testing of slurmrestd options.
+===========================================
+test_112_1   /commands/slurmrestd/test_options.py
+test_112_2   Test slurmrestd's http_parser plugin
+test_112_3   Test the implicit max_nodes rollback on a rejected update
+test_112_4   Test slurmrestd query flags whose names contain spaces
+test_112_5   Test slurmrestd's http status codes for rejected job submissions
+test_112_6   Test slurmrestd's http status codes for slurmdbd rejections
+test_112_7   Test slurmrestd keeps endpoint connections alive
+test_112_8   Test SLURM_JOB_NAME in the batch environment of slurmrestd jobs
+test_112_9   Test external and mixed hetjobs submitted through slurmrestd
+test_112_41  Test slurmrestd v0.0.41 requests
+test_112_42  Test slurmrestd v0.0.42 requests
+test_112_43  Test slurmrestd v0.0.43 requests
+test_112_44  Test slurmrestd v0.0.44 requests
+test_112_45  Test slurmrestd v0.0.45 requests
+test_112_46  Test slurmrestd v0.0.46 requests
+test_112_47  Test slurmrestd v0.0.47 requests
+
+test_113_#   Testing of sprio options.
+======================================
+test_113_1   /commands/sprio/test_--version.py
+test_113_2   /commands/sprio/test_job_options.py
+test_113_3   /commands/sprio/test_--help.py
+test_113_4   /commands/sprio/test_--usage.py
+test_113_5   /commands/sprio/test_--weights.py
+test_113_6   Test sprio SLUID support.
+
+test_114_#   Testing of squeue options.
+=======================================
+test_114_1   /commands/squeue/test_--help.py
+test_114_2   /commands/squeue/test_--usage.py
+test_114_3   /commands/squeue/test_--json.py
+test_114_4   Validate that squeue --only-job-state is listing jobs accurately.
+test_114_5   Check squeue SLUID support
+test_114_6   Test squeue job name filtering options
+test_114_7   Test squeue reports SlurmRC through --Format
+test_114_8   Test squeue --expand-patterns for StdIn, StdOut and StdErr
+
+test_115_#   Testing of sreport options and rollup correctness.
+===============================================================
+test_115_1   /commands/sreport/test_reports.py
+test_115_2   Rollup arithmetic correctness: assoc, QOS, wckey, cluster utilization
+             (alloc/down/plan/invariant), reservation idle redistribution,
+             energy attribution, and hourly->daily->monthly aggregation.
+             Requires auto-config mode. Rolls up every cluster in the
+             accounting DB; use a throwaway DB.
+test_115_3   sreport cluster reports with partition associations. Seeds its own
+             cluster with 2008 usage and rolls that window up for every cluster
+             in the accounting DB; use a throwaway DB.
+
+test_116_#   Testing of srun options.
+=====================================
+test_116_1   /commands/srun/test_parallel_launch_srun.py
+test_116_2   /commands/srun/test_--account.py
+test_116_3   /commands/srun/test_--multi-prog.py
+test_116_4   /commands/srun/test_task_signal_abort_message.py
+test_116_5   /commands/srun/test_hostfile.py
+test_116_6   /commands/srun/test_running_non-existent_job.py
+test_116_7   /commands/srun/test_batch_multiple_concurrent_steps.py
+test_116_8   /commands/srun/test_propagation_of_umask_to_spawned_tasks.py
+test_116_9   /commands/srun/test_--overcommit.py
+test_116_11  /commands/srun/test_--immediate.py
+test_116_12  /commands/srun/test_--output--error_formatting.py
+test_116_13  /commands/srun/test_--exclusive.py
+test_116_14  /commands/srun/test_--preserve-env.py
+test_116_15  /commands/srun/test_--version.py
+test_116_16  /commands/srun/test_--quit-on-interrupt.py
+test_116_17  /commands/srun/test_-v.py
+test_116_18  /commands/srun/test_--ntasks-per-node.py
+test_116_19  /commands/srun/test_srun_user_limits.py
+test_116_20  /commands/srun/test_--slurmd-debug.py
+test_116_21  /commands/srun/test_--task-prolog.py
+test_116_22  /commands/srun/test_--chdir.py
+test_116_23  /commands/srun/test_--no-allocate.py
+test_116_24  /commands/srun/test_--kill-on-bad-exit.py
+test_116_25  /commands/srun/test_signal_forwarding.py
+test_116_26  /commands/srun/test_--no-kill.py
+test_116_27  /commands/srun/test_--mail-type_and_--mail-user.py
+test_116_28  /commands/srun/test_--mem--mincpus--tmp.py
+test_116_30  /commands/srun/test_exit_code_reporting.py
+test_116_31  /commands/srun/test_--help.py
+test_116_32  /commands/srun/test_--input--output--error.py
+test_116_33  /commands/srun/test_srun_increasing_job_sizes.py
+test_116_34  /commands/srun/test_--unbuffered.py
+test_116_36  /commands/srun/test_--debugger-test.py
+test_116_37  /commands/srun/test_--task-epilog.py
+test_116_38  /commands/srun/test_--test-only.py
+test_116_39  /commands/srun/test_--usage.py
+test_116_40  /commands/srun/test_env_variables.py
+test_116_41  /commands/srun/test_--job-name.py
+test_116_42  /commands/srun/test_--threads.py
+test_116_43  /commands/srun/test_--input--output_taskid.py
+test_116_44  /commands/srun/test_task-prolog_and_epilog.py
+test_116_45  /commands/srun/test_-t.py
+test_116_46  /commands/srun/test_--wait.py
+test_116_47  /commands/srun/test_identity.py
+test_116_48  Test SrunPortRange
+test_116_49  Basic MPI functionality tests via srun.
+test_116_50  Test CPU affinity/binding as observed on the node (--cpu-bind)
+test_116_51 /commands/srun/test_--exclusive=allocation
+test_116_52 /commands/srun/test_--exclusive_with_LaunchParamsExclAlloc
+test_116_53  Test MPI/PMIx signaling
+test_116_54  Test MPI/PMI2 signaling (requires MPICH)
+test_116_55  Test srun --async CLI behavior
+test_116_56  Test srun --relative
+test_116_57  Test srun in het job nested in non-het job
+test_116_58  Test srun --async --kill-on-bad-exit kills remaining tasks
+test_116_59  Test the --runtime job submission option and its runtime plugins
+test_116_60  Test the srun/salloc/sbatch --runtime=list option
+test_116_61  Verify a pending synchronous step is assigned a real step ID at submission
+test_116_62  Test pending step IDs and old-srun retry wakes with exhausted ports
+test_116_63  Test MPI/PMIx abort propagation across hetjob components
+test_116_64  Test srun forced termination of a hetjob
+test_116_65  Test srun --bcast in a hetjob
+test_116_66  Test that stopping and resuming a waiting srun does not end its wait
+test_116_67  Verify srun keeps a controller step cancel received during --prolog
+test_116_68  Test memory affinity as observed on the node for NUMA systems (--mem-bind and ldom)
+test_116_69  Test --cpu-bind and --mem-bind parsing and help
+test_116_70  Test srun --cpu-bind and --mem-bind task environment
+test_116_71  Test that srun completes a step it never launched when using stepmgr
+test_116_72  Test a step's exit code is the highest of its tasks
+test_116_73  Test the CPUs srun steps get with --exact and --overlap
+test_116_74  Test a pending-step retry refreshes the port that wakes srun
+
+test_117_#   Testing of sstat options.
+======================================
+test_117_1   /commands/sstat/test_--version.py
+test_117_2   /commands/sstat/test_--help.py
+test_117_3   /commands/sstat/test_--usage.py
+test_117_4   /commands/sstat/test_-e.py
+test_117_5   Check for -j SLUID support in sstat queries
+
+test_118_#   Testing of strigger options.
+=========================================
+test_118_1   /commands/strigger/test_--help.py
+test_118_2   Check for SLUID and JobID support for set and get triggers.
+
+test_119_#   Testing of contribs.
+=================================
+test_119_1   /contribs/openlava/test_lsid.py
+test_119_2   /contribs/torque/qsub/test_basic.py
+
+test_120_#   Testing of cgroups.
+================================
+test_120_1   Check that cgroup path is constructed with the job SLUID.
+test_120_2   Check that cgroup path is constructed with the job ID when configured.
+test_120_3   Check that --max-pids constrains the pids.max file of each step.
+test_120_4   Check that the peak PID count of a step is accounted as pids.
+
+test_121_#   Testing of mps.
+=============================
+test_121_1   /features/gres/test_mps_options.py
+test_121_2   /features/gres/test_mps--gres=mps_by_job.py
+
+test_122_#   Testing of job_arrays.
+===================================
+test_122_1   /features/job_arrays/test_basics.py
+test_122_2   Test job array with gres
+test_122_3   Test suspension of job arrays
+test_122_4   Test srun --jobid attach to a running job array task
+test_122_5   Test scancel job array id handling
+test_122_6   Test sbatch --array specification validation
+test_122_7   Test SchedulerParameters=max_array_tasks enforcement
+test_122_8   Test array tasks drop JobArrayTaskLimit once the limit has room
+test_122_9   Test requeued array tasks don't flood slurmdbd with DBD_JOB_START
+
+test_123_#   Testing of reservations.
+=====================================
+test_123_1   /features/reservations/test_flags.py
+test_123_2   Test RESV_DEL_HOLD
+test_123_3   Test overlapping reservations.
+test_123_4   Test reservation access
+test_123_5   Test reservation access based on QOS
+test_123_6   Test reservation access based on Partition
+test_123_7   Test reservation node replacement interactions
+test_123_8   Test reservation node replacement by features
+test_123_9   Test reservation access with account/user deny '-' lists
+test_123_10  Test reservation creation does not allocate MAINT-reserved nodes
+test_123_11  Test MAGNETIC+FLEX reservations will pick up long jobs
+test_123_12  Test NodeCnt reservation with IGNORE_JOBS on busy partition nodes
+test_123_13  Test reservation node flag set and clear
+test_123_14  Test reservation access to other reservations' nodes and cores
+test_123_15  Test updates preserve INFINITE reservation duration
+test_123_16  Test reservation updates with jobs that already lost access
+test_123_17  Test reservation accounting records and node filter queries
+test_123_18  Test ReqReservation is recorded correctly
+test_123_19  Test jobs requesting multiple reservations and partitions
+
+test_124_#   Testing of AccountingStorageEnforce.
+=================================================
+test_124_1   /parameters/slurm/AccountingStorageEnforce/test_associations.py
+test_124_2   Test het job submission against GrpTRES and its usage accounting
+
+test_125_#   Testing of datawarp.
+=================================
+test_125_1   /parameters/slurm/BurstBufferType/datawarp/test_datawarp.py
+
+test_126_#   Testing of EnforcePartLimits.
+==========================================
+test_126_1   /parameters/slurm/EnforcePartLimits/test_enforcePartLimits.py
+test_126_2   Test het job with per-component QoS/limit aggregation (DenyOnLimit)
+test_126_3   Test het job components each count against QOS MaxSubmitJobsPerUser
+             and association MaxSubmitJobs, at submit, at cancel, on reject
+             and with partition QOS
+test_126_4   Test EnforcePartLimits=ALL rejects jobs exceeding a partition's CPUs
+
+test_127_#   Testing of Epilog.
+===============================
+test_127_1   Test Epilog timeout and child process cleanup
+test_127_2   Test that a resent or aborted job termination sets the Epilog env
+test_127_3   Test the Epilog environment reports a job's exit and return codes
+test_127_4   Test a RunInJob Epilog gets no job exit variables
+
+test_128_#   Testing of PreemptType.
+====================================
+test_128_1   /parameters/slurm/PreemptType/partition_prio/test_preemption_by_partition.py
+test_128_2   Test PreemptExemptTime for "suspend,gang","requeue", and "cancel", including at job start
+test_128_3   Test hetjob is exempt from preemption under SUSPEND,GANG
+test_128_4   Test hetjob REQUEUE/CANCEL preemption, as victim and as preemptor
+test_128_5   Test hetjob mixed-mode components resolve REQUEUE then CANCEL, and per-component GraceTime
+test_128_6   Test hetjob preemption under preempt/qos: SUSPEND exemption, mode resolution, component eligibility
+test_128_7   Test hetjob is excluded from oversubscription while GANG is enabled
+test_128_8   Test GraceTime+PreemptMode=REQUEUE under preempt/partition_prio does not requeue a successful restarted job
+test_128_9   Test GraceTime+PreemptMode=REQUEUE under preempt/qos does not requeue a successful restarted job
+test_128_10  Test a job preempted while CONFIGURING is reported as PREEMPTED
+test_128_11  Test preemption by jobs with a required or excluded node list
+
+test_129_#   Testing of preserve-case slurmdbd parameters.
+===========================================================
+test_129_1   PreserveCaseUser and PreserveCaseAll behavior
+test_129_2   Add/remove/add mixed case user over PCU transitions
+
+test_130_#   Testing of PriorityType.
+=====================================
+test_130_1   /parameters/slurm/PriorityType/basic/test_priority.py
+test_130_2   multifactor plugin algo test for fairshare=parent
+test_130_3   /parameters/slurm/PriorityType/multifactor/test_priority.py
+test_130_4   Test TRESRunMins usage when a QOS UsageFactor is modified mid-run
+test_130_5   Test TRESRunMins give-back with priority/basic and a UsageFactor
+test_130_6   Test per-TRES decay of GrpTRESMins usage with TresDecayHalfLife
+test_130_7   Test TresDecayHalfLife with PriorityDecayHalfLife disabled
+test_130_8   Test a frozen GrpTRESMins quota keeps blocking jobs
+test_130_9   Test setting TresDecayHalfLife applies without a restart
+test_130_10  Test a PriorityDecayHalfLife reconfigure leaves overrides alone
+test_130_11  Test accrue limits on pending jobs
+test_130_12  Test accrue limits with PriorityFlags=ACCRUE_ALWAYS
+test_130_13  Test ResetAccrueTime and accrue limits across restarts
+
+test_131_#   Testing of sshare options.
+========================================
+test_131_1   Test basic sshare --json
+
+test_132_#   Testing of Prolog.
+===============================
+test_132_1   /parameters/slurm/Prolog/test_prolog.py
+test_132_2   Test holds placed on a running job during its node prolog
+test_132_3   Test job state while the Prolog runs with various PrologFlags
+test_132_4   Test job state while PrologSlurmctld and the Prolog run
+test_132_5   Test a job requeued by a failed Prolog runs when retried
+test_132_6   Test a Prolog failure keeps a job from finishing configuration
+
+test_134_#   Testing of SwitchType.
+===================================
+test_134_1   /parameters/slurm/SwitchType/none/test_window_exclusivity.py
+test_134_2   Test switch/lua hook sequence, jobinfo round trip and return codes
+test_134_3   Test switch/lua asynchronous job_start and job_complete, node
+             blocking, drain on failure and switch_timeout
+test_134_4   Test switch/lua job_start and job_complete recovery across a
+             slurmctld restart
+test_134_5   Test switch/lua teardown that does not hold its nodes back
+test_134_6   Test SlurmctldParameters=switch_drain_on_failure=no
+test_134_7   Test switch/lua teardown that asks to be tried again, and the
+             limit on how often
+test_134_8   Test switch/lua job_start and job_complete return values
+test_134_9   Test switch/lua step functions when setup_special_steps
+             returns true
+
+test_135_#   Testing of TaskEpilog.
+===================================
+test_135_1   /parameters/slurm/TaskEpilog/test_task_epilog.py
+
+test_136_#   Testing of node_attributes options.
+================================================
+test_136_1   /parameters/slurm/node_attributes/test_CoreSpecCount.py
+test_136_2   /parameters/slurm/node_attributes/test_CpuSpecList.py
+
+test_137_#   Testing of helpers options.
+========================================
+test_137_1   /plugins/node_features/helpers/test_plugin.py
+test_137_2   Test rebootless features
+test_137_3   Test mutually exclusive changeable features and reboot script parameters
+test_137_4   Test constraint expressions with changeable features
+test_137_5   Test job step constraints with changeable features
+
+test_138_#   Testing stressing cases.
+=====================================
+test_138_1   /stress/test_stdin_broadcast.py
+test_138_2   Test parallel performance of squeue
+test_138_3   Stress test multiple simultaneous commands via multiple threads
+
+test_139_#   Testing dynamic nodes.
+===================================
+test_139_1   Test creation, registration, usage, and deletion of dynamic nodes.
+test_139_2   Test dynamic external node states don't go NOT_RESPONDING after update.
+test_139_3   Test dynamic future nodes get NodeAddr and NodeHostName from slurmd.
+test_139_4   Test dynamic node range creation and rollback of a failed create.
+test_139_5   Test PMIx steps spanning a dynamic node in a heterogeneous job.
+test_139_6   Test SlurmctldParameters=dynamic_node_dns NodeName resolution.
+test_139_7   Test SlurmctldParameters=dynamic_node_dns with a slurmd -F node.
+test_139_8   Test recreated dynamic external and cloud nodes can be allocated.
+
+test_140_#   Testing --tres options.
+====================================
+test_140_1   Test --tres-per-task option
+test_140_2   Test --tres-bind validation
+test_140_3   Test license alloc/used and hold across batch job requeue
+test_140_4   Test license request grammar
+test_140_5   Test scontrol update of job TRES fields
+
+test_141_#   Testing PowerSave/Cloud operations.
+================================================
+test_141_1   Test state cycle, timeouts, scontrol commands, PowerDownOnIdle, and Node Features reboot
+test_141_2   Testing Global,Per-Partition,Per-Node Cloud Options
+test_141_3   Test node reboot and power down/up actions via slurmctld and slurmd
+test_141_4   Test srun to a powered down cloud node with enable_stepmgr
+test_141_5   Test powered down nodes are not left UNKNOWN on reconfigure/restart
+test_141_6   Test NOT_RESPONDING is not set on, and is cleared from, powered down nodes
+test_141_7   Test that a job launches promptly once its powering-up nodes register
+test_141_8   Test that a job launches promptly once its rebooted nodes register
+test_141_9   Test that a job launches promptly once its feature-rebooted nodes register
+test_141_10  Test that a job still launches on the periodic poll without the option
+test_141_11  Test cloud node first registration binds count-only GRES jobs in place
+test_141_12  Test per-node SuspendTime when automatic power save is not configured
+test_141_13  Test per-node SuspendTime across reconfigure and slurmctld restarts
+test_141_14  Test per-node SuspendTime enabling power save without a reconfigure
+test_141_15  Test node reboot Reason survives a later job allocation on a shared node
+test_141_16  Test ResumeTimeout values too large for 16 bits
+test_141_17  Test a ResumeTimeout too large for slurmscriptd does not kill the ResumeProgram
+test_141_18  Test the ResumeProgram JSON gives the layout of each job
+test_141_19  Test SuspendExcStates=DEGRADED keeps a degraded node powered up
+test_141_20  Test reboot cancel, nextstate=resume and timeout drain handling
+test_141_21  Test scontrol power up/down reports the nodes it skips
+
+test_142_#   Testing of slurmdbd database session settings.
+===========================================================
+test_142_1   Test that a rollup manages Galera streaming replication on its
+             connection. Rolls up every cluster in the accounting DB; use a
+             throwaway DB. CI only exercises the non-Galera case.
+
+test_143_#   Testing --switches.
+================================
+test_143_1   Test switches with topology/tree + select/cons_tres
+
+test_144_#   Testing of gres.
+================================
+test_144_1   Test --exclusive allocation with gres flagged as explicit
+test_144_2   Test enforce-binding jobs and --overlap steps with core-bound GPUs
+test_144_3   Test --exact with GPUs and multiple steps
+test_144_4   Test gres with file or type and --overlap
+test_144_6   Test gres with no_consume flag
+test_144_7   Test allocating sub-sets of GRES to job steps
+test_144_8   Test various parameters with and without enforce binding
+test_144_9   Test RestrictedCoresPerGPU
+test_144_10  Test Flags=env_uuid sets proper environment variables
+test_144_11  Test GRES reservation with node table changes
+test_144_12  Test dynamic-normal slurmd (`slurmd -Z`) GRES autofill
+test_144_13  Test CountOnly GRES does not alter per-socket core distribution
+test_144_14  Test overcommit with GRES tres-per-task
+test_144_15  Test gres.conf UUID supplies device UUIDs without AutoDetect
+test_144_16  Test gres.conf UUID merged with AutoDetect UUIDs
+test_144_18  Test shard device memory enforcement (ConstrainDeviceMemory)
+test_144_19  Test per-device typed shard counts in gres.conf
+test_144_20  Test a step's GPU frequency setup across its GRES records
+test_144_21  Test job handling when a node's shard/mps GRES topology changes
+test_144_22  Test --gres-flags=enforce-links requires a job's GRES to be linked
+test_144_23  Test --gres-flags=ignore-links selects GRES without using links
+test_144_24  Test --gres-flags=enforce-links where a node's request gets split
+test_144_25  Test --gres-flags=enforce-links on a GRES configured by count
+test_144_26  Test --gres-flags=enforce-links with RestrictedCoresPerGPU
+test_144_27  Test --gres-flags=enforce-links with enforce-binding
+test_144_28  Test the energy plugin on a step node holding no GPU bitmap
+test_144_29  Test gres.conf Cores= binds GRES as a preference, not a constraint
+test_144_30  Test --mem-per-gpu memory allocation and cgroup enforcement
+test_144_31  Test GRES chunk config edits and validation
+test_144_32  Test GRES device chunks on dynamic nodes
+test_144_33  Test GRES device chunks are refused on a shared GRES
+test_144_34  Test GRES chunks of 4 and 8: nesting, best fit and ChunkOrder
+test_144_35  Test GRES device chunks with Cores= and enforce-binding
+test_144_36  Test GRES device chunks on GPUs that slurmd detects
+test_144_37  Test GRES device chunk allocation (gres.conf ChunkSizes/ChunkOrder)
+test_144_38  Test GRES device numbering with an unusable gres.conf File entry
+test_144_39  Test RestrictedCoresPerGPU jobs get every requested GPU or pend
+test_144_40  Test --gres parsing and help
+test_144_41  Test a GPU with no UUID is numbered by its place in the report
+test_144_42  Test gres.conf Cores= must cover whole sockets the node has
+test_144_43  Test a shard job survives an unchanged slurmd registration
+
+test_145_#   Testing --constraint, --prefer and --extra.
+========================================================
+test_145_1   Test --constraint with --ntasks-per-node
+test_145_2   Test --constraint
+test_145_3   Test job with --constraint will not preempt other jobs if resources are available
+test_145_4   Test --prefer validation, placement, and combination with --constraint
+test_145_5   Test --prefer in conjunction with ignore_prefer_validation
+test_145_6   Test setting node Extra for extra_constraints
+test_145_7   Test job --extra with extra_constraints
+test_145_8   Test matching-OR --constraint with more than 64 alternatives
+
+test_146_#   Testing partitions.
+================================
+test_146_1   Test MaxCPUsPerNode and MaxCPUsPerSocket
+test_146_2   Test MaxNodes
+test_146_3   Test MinNodes
+test_146_4   Test a partition QOS cannot be changed while jobs are running or suspended in it
+test_146_5   Test MaxMemPerCPU with --mem and --*-per-* options
+
+test_147_#   Testing SPANK.
+===========================
+test_147_1   Test SPANK contained when SlurmdParameters=contain_spank
+test_147_2   Test SPANK remote spank init failure modes
+test_147_3   Test SPANK hook failures match the spank.8 Errors table
+test_147_4   Test SPANK plugins that link against libslurm
+test_147_5   Test adopting a pid waits for the extern step setup
+
+test_149_#   Testing AcctGatherProfileType.
+===========================================
+test_149_1   Test acct_gather_profile/influxdb
+test_149_2   Test acct_gather_profile/influxdb grouped fields and extra tags
+test_149_3   Test acct_gather_profile/hdf5 task profile consistency
+test_149_4   Test GPU profile columns stay zero without GPU usage samples
+test_149_5   Test GPU profile columns stay zero with only gres/gpumem tracked
+test_149_6   Test the extern step's profile columns stay zero
+
+test_150_#   Testing topology plugins.
+================================
+test_150_1   Test topology/block
+test_150_2   Test "--nodelist" + "--segment"
+test_150_3   Test topology-aware task distribution
+test_150_4   Test emitted node lists and per-node arrays follow task placement
+test_150_5   Test slurmd first-registration gate for topology/instance/extra fields
+test_150_6   Test topology/tree + RouteTree relays a forwarded message once per switch
+test_150_7   Test topology preserved when a partial node update splits the config
+test_150_8   Test overcommit with cpus-per-task across a topology cluster
+test_150_9   Test bad topology.yaml handling
+test_150_10  Test --contiguous node selection per topology plugin
+test_150_11  Test "--segment" with job-scoped GPU requests on topology/block
+test_150_12  Test early bail for --segment with --spread-segments
+test_150_13  Test alphanumeric node sort within a switch and a block
+test_150_14  Test DefSegmentSize ignored without segment support
+test_150_15  Test slurmd message forwarding with a tree width below the node count
+test_150_16  Test LLN, bf_busy_nodes, pack_serial_at_end on 1-node jobs per topology
+test_150_17  Test partition DefSegmentSize with topology/block
+test_150_18  Test DefSegmentSize changes reaching pending jobs
+test_150_19  Test topology/block placement for TPU 3D (tpu7x) layouts
+test_150_20  Test backfill plans a node list job behind an --exclusive=topo job
+             for its end, with its GRES untouched and no cons_tres errors
+test_150_21  Test --exclusive=topo enforced on a block partition, also against
+             jobs sent through a tree partition, but not on a tree partition
+test_150_22  Test backfill plan of a whole topo job in a block with a down node
+
+test_151_#   Testing Oversubscribe
+===========================================
+test_151_1   Test oversubscribe with sharing partitions
+test_151_2   Test OverSubscribe and Exclusive intent in scontrol and env vars
+test_151_3   Test oversubscribe and contiguous options.
+test_151_4   Test per-partition OverSubscribe job count for FORCE and YES
+
+test_152_#   Testing switch/nvidia_imex.
+========================================
+test_152_1   Test IMEX channel allocation/deallocation
+test_152_2   Test --network=unique-channel-per-segment
+
+test_153_#   Testing Metrics/Type.
+========================================
+test_153_1   Test basic metrics/openmetrics
+test_153_2   Test various allocation fields for metrics/openmetrics
+test_153_3   Test metrics endpoint connection reuse with empty and populated replies
+test_153_4   Test the partition_jobs_wait_part_node_limit metric
+
+test_154_#   Testing HRes.
+========================================
+test_154_1   Test HRes MODE_3
+test_154_2   Test HRes MODE_3 preemption
+test_154_3   Test updating the MODE_3 HRES request of a pending job
+test_154_4   Test the hres/lua callback lifecycle
+test_154_5   Test recovery of runtime changes to HRES layer nodes
+test_154_6   Test scontrol update nodename HRES=
+test_154_7   Test the hres field of the slurmrestd node endpoints
+
+test_155_#   Testing sh5util
+========================================
+test_155_1   Test sh5util options
+test_155_2   Test sh5util merge and extract (--profile=task)
+test_155_3   Test sh5util Network fields (--profile=network)
+
+test_156_#   Testing job step launching
+========================================
+test_156_1   Test "--hint=nomultithread"
+test_156_2   Test SLURM_STEP_ID and SLURM_STEPID of batch, interactive and srun steps
+
+test_157_#   Testing of JobSubmitPlugins.
+============================================
+test_157_1   Test job_desc with JobSubmitPlugins=lua
+test_157_2   Test core_spec/thread_spec in job_desc with JobSubmitPlugins=lua
+test_157_3   Test clearing the supported job_desc string fields via job_submit/lua on modify
+test_157_4   Test job_submit/lua clear limits: submit path, unsupported fields, non-empty assignment
+test_157_5   Test job_submit/lua reading state_reason and state_desc of a job record
+test_157_6   Test job_submit/tpu --layout validation, sizing, and GRES injection
+
+test_158_#   Testing of Licenses
+============================================
+test_158_1   Remote Licenses
+test_158_2   Test remote license fuzzy matching
+
+test_159_#   Testing of Namespace plugins
+============================================
+test_159_1   Test basic namespace/linux functionality (25.11+)
+test_159_2   Test unique mount and mount options in namespace/linux (26.05+)
+test_159_3   Test CLONE_NEWIPC private IPC namespace in namespace/linux (26.11+)
+
+test_160_#   Testing dynamic memory limits.
+===========================================
+test_160_1   Test memory reduction on running jobs (scontrol and --mem-update)
+
+test_161_#   Testing topology/torus3d.
+========================================
+test_161_1   Test topology/torus3d placements, constraints, and --segment
+test_161_2   Test "--segment" with job-scoped GPU requests on topology/torus3d
+
+test_162_#   Testing of swait and stepmgr/async-step integration.
+=================================================================
+test_162_1   Test swait against a stepmgr-enabled cluster
+test_162_2   Test swait's steps-drained push path
+test_162_3   Test scontrol visibility and reconfigure-survival of async steps
+test_162_4   Verify pending synchronous step id-at-submit holds under stepmgr
+test_162_5   Test swait per-step wait targets and their reported results
+test_162_6   Test swait reporting for steps ending in a terminal-failure state
+test_162_7   Test swait --follow and the whole-set drain
+test_162_8   Test swait --json/--yaml output and data_parser selection
+test_162_9   Test swait against a cluster without stepmgr enabled
+test_162_10  Test a step create carrying an array task id under stepmgr
+test_162_11  Verify pending synchronous steps launch FIFO under create-at-wake stepmgr
+test_162_12  Test that a pre-26.11 srun keeps the poke-and-re-send path under stepmgr
+test_162_13  Test stepmgr releases a step that fails to launch
+test_162_14  Test srun --step-dependency under stepmgr
+test_162_15  Verify a dependency-ready step retries when reserved ports free
+test_162_16  Test step dependencies require stepmgr and support per-job stepmgr
+test_162_17  Test a cancelled stepmgr job refuses new steps but a signaled one does not
+
+test_163_#   Testing jobacct_gather/cgroup memory accounting.
+=============================================================
+test_163_1   Test completed accounting preserves short memory peaks
+
+test_164_#   Testing batch job launch recovery.
+=================================================
+test_164_1   Test a batch job survives a slurmctld reconfigure during its prolog
+test_164_2   Test node accounting when a node leaves a requeued completing job
+
+test_165_#   Testing multi-partition allocated partition recovery and ordering
+==============================================================================
+test_165_1   Test multi-partition job/array keeps partition on restart
+test_165_2   Test completing job keeps partition on recovery
+test_165_3   Test multi-partition job keeps partition across changes
+test_165_4   Test partition PriorityTier ordering of a pending job
+test_165_5   Test multi-partition job submission with srun and salloc
+test_165_6   Test multi-partition job keeps partition on repeated restarts
+
+test_166_#   Testing TLS.
+==========================
+test_166_1   Test RPC listeners reject non-TLS and accept TLS connections
+test_166_2   Test slurmctld rejects non-TLS RPCs with HTTP listening disabled
+test_166_3   Test swait's listener rejects non-TLS connections
+test_166_4   Test slurmdbd closes connections that are not TLS wrapped
+
+test_167_#   Testing of HealthCheckProgram.
+===========================================
+test_167_1   Test SLURM_NODE_IS_HEALTHY reporting to HealthCheckProgram
+test_167_2   Test per-class broadcast gating, restart recovery, DOWN detection
+test_167_3   Test CYCLE health checks preserve HealthCheckInterval
+
+test_168_#   Testing of heterogeneous jobs.
+===========================================
+test_168_1   Validate sbatch heterogeneous job environment variables.
+test_168_2   Test job-global step ids with --stepmgr on heterogeneous jobs.
+test_168_3   Test sbcast and squeue against a --stepmgr heterogeneous job.
+test_168_4   Validate scontrol show job fields for heterogeneous job components.
+test_168_5   Test that job arrays of hetjobs are rejected
+test_168_6   Test the hold reason set on every component of a held
+             heterogeneous job
+test_168_7   Test hetjobs with external components run, end and survive restarts
+
+test_169_#   Testing of scrontab options.
+=========================================
+test_169_1   Test that scrontab builds a job description from a #SCRON line
+test_169_2   Test that #SCRON --export=NIL skips loading the login environment
+
+test_170_#   Testing of sched/backfill.
+=======================================
+test_170_1   Test TRESRunMins usage when a --time-min job's limit is trimmed.
+test_170_2   Test backfill reserves the preempted nodes and keeps other jobs off them
+test_170_3   Test backfill starts jobs on resuming nodes only while available.
+test_170_4   Test SchedulerParameters=time_min_as_soft_limit
+
+test_171_#   Testing of the runtime plugin interface.
+=====================================================
+test_171_1   Test runtime/lua does not break srun/sbatch/salloc job launch
+test_171_2   Test which container bundle each runtime gives steps, salloc, and sbatch
+
+test_172_#   Testing of JobComp plugins.
+========================================
+test_172_1   Test the exit code jobcomp/filetxt records for a completed job
+test_172_2   Test jobcomp/kafka start and end records on separate topics
+test_172_3   Test job state transition events with a finish-only jobcomp
+             plugin
+test_172_4   Test jobcomp/kafka job state transition event records
+test_172_5   Test jobcomp/kafka per-event default topics and enable flags
+test_172_6   Test jobcomp/kafka explicit per-event topics and topic_all
+             precedence
+test_172_7   Test jobcomp/lua job state transition events
+test_172_8   Test the jobcomp/lua job start event
+test_172_9   Test jobcomp/kafka default topics of the queue, start, and
+             release events
+test_172_10  Test sacct -c/-f with jobcomp/filetxt and log rotation
+test_172_11  Test jobcomp/script runs JobCompLoc once per finished job
+test_172_12  Test sacct -c reading jobcomp/mysql records of finished jobs
+test_172_13  Test jobcomp/elasticsearch records and resend after restart
+
+test_173_#   Testing of DBD Agent
+========================================
+test_173_1   Test the DBD agent queue drains after a stranded requeue of a resized job
+
+test_174_#   Testing of main scheduler.
+=======================================
+test_174_1   Test scheduling after het job components fail by partition
+test_174_2   Test scheduling after reservation jobs fail by partition
+
+test_175_#   Testing of MailProg.
+=================================
+test_175_1   Test that MailProg=None disables mail notifications
+
+test_176_#   Testing slurmdbd connection handling.
+===================================================
+test_176_1   Test slurmdbd read timeouts and short-header timeouts
+test_176_2   Test slurmdbd TLS negotiation timeouts
+test_176_3   Test batched DBD_SEND_MULT_MSG delivery
+test_176_4   Test slurmdbd RPC authorization by authentication level
+
+test_177_#   Testing of PrivateData.
+====================================
+test_177_1   Test PrivateData=users in slurmdbd.conf
+test_177_2   Test PrivateData in slurm.conf
+test_177_3   Test scontrol show authorization when PrivateData is set
+test_177_4   Test scontrol show authorization by default
+
+test_178_#   Testing of task/resctrl.
+=====================================
+test_178_1   Test task/resctrl groups and step placement on resctrl hardware
+
+test_179_#   Testing of cli_filter/lua.
+=======================================
+test_179_1   Test that rejected Lua option assignments are logged
+
+test_180_#   Testing daemon HTTP endpoints.
+============================================
+test_180_1   Test slurmctld, slurmd, and slurmdbd HTTP endpoint connection reuse
+test_180_2   Test slurmdbd HTTP content, authentication, and versioned replies
+
+test_181_#   Testing of RequeueExit and RequeueExitHold.
+========================================================
+test_181_1   Test requeue matching on exit status and Slurm return code
+
+test_182_#   Testing of KV options.
+====================================
+test_182_1   Test KV and KVPatch on jobs, nodes, partitions, and reservations
+test_182_2   Test authorization for job KV and KVPatch updates
+test_182_3   Test job KV output and updates through slurmrestd v0.0.46
+
+test_183_#   Testing of job I/O relay.
+======================================
+test_183_1   Test relay_io/uds_json relays job and step output
+test_183_2   Test relay_io/uds_json at its shipped default settings
+test_183_3   Test job_submit/lua can set a job's relay_io field
+
+test_184_#   Testing of --hint.
+===============================
+test_184_1   Test --hint parsing and help
+
+test_185_#   Testing of AccountingStorageExternalHost.
+======================================================
+test_185_1   Test registration with external slurmdbds
+
+test_189_#   Testing node registration.
+======================================
+test_189_1   Test per-node config_overrides on the registration that reports it
+
+test_190_#   Testing GRES/TRES drain and resume.
+=================================================
+test_190_1   Test what a drained TRES reports and what it costs the node
+test_190_2   Test TresName/Action request validation shared by every TRES
+test_190_3   Test the REST node record drained_tres field
+test_190_4   Test CPU and core drain and threads per core
+test_190_5   Test node memory drain and resume
+test_190_6   Test count-only GRES drain/resume across multiple dynamic nodes
+test_190_7   Test File/UUID based GRES drain/resume
+test_190_8   Test shared GRES (shard and MPS) drain/resume
+test_190_9   Test GRES drain/undrain accounting events
+test_190_10  Test absent GPU drains in the accounting event
+test_190_11  Test an untracked GPU drain is named but not counted in events
+test_190_12  Test node and cluster TRES totals are unaffected by a TRES drain
+test_190_13  Test drain_absent_gres auto-drains an absent GPU
+test_190_14  Test a saved UUID order across a configured-count change
+test_190_15  Test an exclusive job gets the present GPUs of two types
+test_190_16  Test GRES device chunks when a GPU is absent
+test_190_17  Test a GPU set against its configured Gres count
+test_190_18  Test GRES drains stay when slurmd reports no device
+test_190_19  Test an absent GPU auto-drains with config_overrides on
+
+test_191_#   Testing of HashPlugin.
+===================================
+test_191_1   Test scontrol hash digests and SHA3 clients of K12 daemons
+test_191_2   Test slurmctld and slurmdbd with HashPlugin=hash/sha3
